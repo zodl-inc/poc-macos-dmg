@@ -28,13 +28,17 @@ jobs:
           role-to-assume: arn:aws:iam::907793002116:role/poc-macos-dmg-gha
           aws-region: us-east-1
 
-      - name: Import Developer ID certificate from SM
+      - name: Import Developer ID certificate + load notarization creds
         run: |
           SECRET=$(aws secretsmanager get-secret-value \
             --secret-id /infra/apple/developer-id-macos \
             --query SecretString --output text)
           P12_B64=$(echo "$SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['p12_base64'])")
           P12_PASS=$(echo "$SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['p12_password'])")
+          APPLE_ID=$(echo "$SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['apple_id'])")
+          NOTARY_PASS=$(echo "$SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['notarytool_password'])")
+          TEAM_ID=$(echo "$SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['team_id'])")
+
           echo "$P12_B64" | base64 --decode > /tmp/cert.p12
           security create-keychain -p ci-keychain /tmp/ci.keychain
           security default-keychain -s /tmp/ci.keychain
@@ -45,8 +49,30 @@ jobs:
           security set-keychain-settings -lut 3600 /tmp/ci.keychain
           rm /tmp/cert.p12
 
+          # Store notarization creds in keychain for notarytool
+          xcrun notarytool store-credentials "notarytool-ci" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$TEAM_ID" \
+            --password "$NOTARY_PASS" \
+            --keychain /tmp/ci.keychain
+
+          echo "TEAM_ID=$TEAM_ID" >> $GITHUB_ENV
+
       - name: Build app + sign + DMG
         run: chmod +x scripts/build-signed.sh && ./scripts/build-signed.sh
+
+      - name: Notarize DMG
+        run: |
+          DMG=$(ls build/HelloWorld-*.dmg)
+          echo "Submitting $DMG for notarization..."
+          xcrun notarytool submit "$DMG" \
+            --keychain-profile "notarytool-ci" \
+            --keychain /tmp/ci.keychain \
+            --wait \
+            --timeout 10m
+          echo "Stapling notarization ticket..."
+          xcrun stapler staple "$DMG"
+          echo "✅ Notarized and stapled: $DMG"
 
       - name: Create GitHub Release and upload DMG
         uses: softprops/action-gh-release@v2
@@ -56,11 +82,11 @@ jobs:
           body: |
             ## HelloWorld ${{ env.VERSION }}
 
-            Signed with **Developer ID Application** (ECC / RLPRR8CPQG).
+            Signed + **notarized** with Developer ID Application (ECC / RLPRR8CPQG).
+            Opens without any Gatekeeper warning.
 
             ### Install
             Download the `.dmg`, open it, drag **HelloWorld.app** to Applications.
-            No Gatekeeper warning — properly signed.
 
             ### Auto-update
             The app checks for updates on every launch and prompts before installing.
