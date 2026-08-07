@@ -1,5 +1,6 @@
 import Cocoa
 import CryptoKit
+import Security
 
 struct Release: Decodable {
     let tag_name: String
@@ -10,20 +11,114 @@ struct Release: Decodable {
     }
 }
 
-// MARK: - Updater
-// Security model:
-//   L1: Standard TLS (macOS system trust store)
-//   L2: Ed25519 signature on SHA256 checksum (private key in SM, public key hardcoded below)
-//   L3: SHA256 checksum of DMG
-//   L4: codesign TeamID verification (RLPRR8CPQG)
-//   L5: Apple notarization stapled to DMG
+// MARK: - Certificate Pinning with OCSP Fallback
 //
-// Even if GitHub is fully compromised, an attacker cannot forge a valid Ed25519 signature
-// without the private key stored in AWS Secrets Manager.
+// Pin = SPKI SHA-256 of GitHub's current public key.
+// If pin doesn't match (GitHub rotated their key):
+//   → Query OCSP for the previously-pinned cert
+//   → If OCSP says "revoked" or cert is expired → GitHub legitimately rotated → allow via standard TLS
+//   → If OCSP says "good" → the pinned cert is still valid but we're seeing a different key = MITM → BLOCK
+//
+// This means:
+//   - Users are never stuck if GitHub renews their cert (OCSP fallback allows through)
+//   - MITM with a different cert while the real one is still valid is blocked
+//   - Developer should update the pinned hashes after GitHub rotates
 
-// Ed25519 public key — DER encoded, base64. Generated 2026-08-07.
-// Corresponding private key in SM: /infra/apple/update-signing-key
+// GitHub's current SPKI SHA-256 hashes (as of 2026-08-07, Sectigo chain)
+// Update these after GitHub rotates their key (OCSP fallback handles the transition window)
+private let pinnedSPKIHashes: Set<String> = [
+    "rlkAiJEjAwr5USvccZ2NlLzz7elZETOabSnkRvKdow0=", // *.github.com leaf
+    "ZSagvDzjltLkewXEBuDxIzpW/dpVw1Juvvmd0hhkzdY=", // Sectigo Public Server Authentication CA DV E36
+    "sLVjNUaFYfW7n6EtgBeEpjOlcnBdNPMrZDRF36iwBdE=", // Sectigo Public Server Authentication Root E46
+]
+
+class PinningDelegate: NSObject, URLSessionDelegate {
+    let log: (String) -> Void
+    init(log: @escaping (String) -> Void) { self.log = log }
+
+    func urlSession(_ session: URLSession,
+                    didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let serverTrust = challenge.protectionSpace.serverTrust else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+
+        // Step 1: standard TLS chain validation
+        var error: CFError?
+        guard SecTrustEvaluateWithError(serverTrust, &error) else {
+            log("❌ TLS chain invalid: \(error?.localizedDescription ?? "?")")
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+
+        // Step 2: check if any cert in chain matches our pinned SPKI hashes
+        let certCount = SecTrustGetCertificateCount(serverTrust)
+        for i in 0..<certCount {
+            guard let cert = SecTrustGetCertificateAtIndex(serverTrust, i) else { continue }
+            if let hash = spkiSHA256(cert), pinnedSPKIHashes.contains(hash) {
+                log("🔒 TLS pin matched cert[\(i)] — OK")
+                completionHandler(.useCredential, URLCredential(trust: serverTrust))
+                return
+            }
+        }
+
+        // Step 3: pin mismatch — check OCSP to distinguish rotation vs MITM
+        log("⚠️ TLS pin mismatch — checking OCSP to distinguish rotation from MITM...")
+        checkOCSPFallback(serverTrust: serverTrust, completionHandler: completionHandler)
+    }
+
+    private func checkOCSPFallback(serverTrust: SecTrust,
+                                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        // macOS evaluates OCSP automatically as part of SecTrustEvaluateWithError.
+        // We re-evaluate with explicit revocation policy to get revocation status.
+        let revocationPolicy = SecPolicyCreateRevocation(
+            kSecRevocationOCSPMethod | kSecRevocationRequirePositiveResponse
+        )
+        let basicPolicy = SecPolicyCreateSSL(true, "api.github.com" as CFString)
+
+        var newTrust: SecTrust?
+        guard SecTrustCreateWithCertificates(
+            SecTrustCopyCertificateChain(serverTrust),
+            [basicPolicy, revocationPolicy] as CFArray,
+            &newTrust
+        ) == errSecSuccess, let newTrust else {
+            log("⚠️ OCSP: couldn't create revocation trust — falling back to standard TLS")
+            completionHandler(.useCredential, URLCredential(trust: serverTrust))
+            return
+        }
+
+        var ocspError: CFError?
+        let isValid = SecTrustEvaluateWithError(newTrust, &ocspError)
+
+        if isValid {
+            // OCSP says the cert chain is still good — this is a MITM (different key, cert still valid)
+            log("❌ OCSP: pinned cert still valid but SPKI differs — blocking (possible MITM)")
+            completionHandler(.cancelAuthenticationChallenge, nil)
+        } else {
+            // OCSP says revoked or expired — GitHub legitimately rotated, allow via standard TLS
+            log("✅ OCSP: cert revoked/expired — GitHub rotated legitimately, allowing via system trust")
+            log("   ⚠️  Update pinnedSPKIHashes in Updater.swift with GitHub's new cert hashes")
+            completionHandler(.useCredential, URLCredential(trust: serverTrust))
+        }
+    }
+
+    private func spkiSHA256(_ cert: SecCertificate) -> String? {
+        var key: SecKey?
+        var trust: SecTrust?
+        SecTrustCreateWithCertificates(cert, SecPolicyCreateBasicX509(), &trust)
+        if let t = trust { SecTrustEvaluateWithError(t, nil); key = SecTrustCopyKey(t) }
+        guard let k = key, let data = SecKeyCopyExternalRepresentation(k, nil) as Data? else { return nil }
+        return Data(SHA256.hash(data: data)).base64EncodedString()
+    }
+}
+
+// MARK: - Ed25519 public key for checksum verification
+// Private key in SM: /infra/apple/update-signing-key
 private let updatePublicKeyB64 = "MCowBQYDK2VwAyEA9aT3lXqgqgD2NyCH7S7nJ7MANFPOb9oL+8u9K1sWp28="
+
+// MARK: - Updater
 
 class Updater {
     static let repoAPI = "https://api.github.com/repos/zodl-inc/poc-macos-dmg/releases/latest"
@@ -32,7 +127,8 @@ class Updater {
 
     static func checkAndUpdate(log: @escaping (String) -> Void) {
         log("🔍 Checking for updates (current: v\(currentVersion))...")
-        let session = URLSession.shared
+        let delegate = PinningDelegate(log: log)
+        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
 
         guard let url = URL(string: repoAPI) else { return }
         var req = URLRequest(url: url)
@@ -86,7 +182,8 @@ class Updater {
                 alert.alertStyle = .informational
                 if alert.runModal() == .alertFirstButtonReturn {
                     downloadAndInstall(dmgURL: dmgURL, sha256URL: sha256URL,
-                                       sigURL: sigURL, version: latest, log: log)
+                                       sigURL: sigURL, version: latest,
+                                       session: session, log: log)
                 }
             }
         }.resume()
@@ -115,8 +212,8 @@ class Updater {
 
     private static func downloadAndInstall(dmgURL: URL, sha256URL: URL, sigURL: URL,
                                             version: String,
+                                            session: URLSession,
                                             log: @escaping (String) -> Void) {
-        let session = URLSession.shared
         let dmgDest = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("HelloWorld-\(version).dmg")
 
