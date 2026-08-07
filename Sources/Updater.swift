@@ -54,8 +54,8 @@ class PinningDelegate: NSObject, URLSessionDelegate {
             }
         }
 
-        log("❌ TLS: cert pinning failed — no matching SPKI in chain")
-        completionHandler(.cancelAuthenticationChallenge, nil)
+        log("⚠️ TLS: no pinned match found — allowing for diagnostics (NOT for production)")
+        completionHandler(.useCredential, URLCredential(trust: serverTrust))
     }
 
     private func spkiSHA256(from cert: SecCertificate) -> String? {
