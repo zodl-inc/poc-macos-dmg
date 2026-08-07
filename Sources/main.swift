@@ -12,13 +12,13 @@ let window = NSWindow(
 window.title = "Hello World"
 window.center()
 
-let label = NSTextField(labelWithString: "Hola Mundo 👋")
+let label = NSTextField(labelWithString: "Hello World 👋")
 label.font = NSFont.systemFont(ofSize: 36, weight: .bold)
 label.alignment = .center
 label.frame = NSRect(x: 0, y: 70, width: 400, height: 60)
 window.contentView?.addSubview(label)
 
-let version = NSTextField(labelWithString: "v1.0.8")
+let version = NSTextField(labelWithString: "v1.0.9")
 version.font = NSFont.systemFont(ofSize: 12)
 version.textColor = .secondaryLabelColor
 version.alignment = .center
