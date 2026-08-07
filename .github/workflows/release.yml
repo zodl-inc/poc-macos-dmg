@@ -61,6 +61,26 @@ jobs:
       - name: Build app + sign + DMG
         run: chmod +x scripts/build-signed.sh && ./scripts/build-signed.sh
 
+      - name: Sign SHA256 checksum with Ed25519
+        run: |
+          # Fetch Ed25519 private key from SM
+          SIGNING_SECRET=$(aws secretsmanager get-secret-value \
+            --secret-id /infra/apple/update-signing-key \
+            --query SecretString --output text)
+          echo "$SIGNING_SECRET" | python3 -c \
+            "import json,sys,base64; print(base64.b64decode(json.load(sys.stdin)['private_key_pem_b64']).decode())" \
+            > /tmp/update_signing_key.pem
+
+          SHA256_FILE=$(ls build/HelloWorld-*.sha256)
+          openssl pkeyutl -sign \
+            -inkey /tmp/update_signing_key.pem \
+            -in "$SHA256_FILE" \
+            -out "${SHA256_FILE}.sig"
+          # Encode sig as base64 for easy embedding
+          base64 -i "${SHA256_FILE}.sig" -o "${SHA256_FILE}.sig.b64"
+          echo "✅ Signed: $(cat ${SHA256_FILE}.sig.b64)"
+          rm /tmp/update_signing_key.pem "${SHA256_FILE}.sig"
+
       - name: Notarize DMG
         run: |
           DMG=$(ls build/HelloWorld-*.dmg)
@@ -80,6 +100,7 @@ jobs:
           files: |
             build/HelloWorld-*.dmg
             build/HelloWorld-*.sha256
+            build/HelloWorld-*.sha256.sig.b64
           generate_release_notes: false
           body: |
             ## HelloWorld ${{ env.VERSION }}

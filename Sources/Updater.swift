@@ -11,9 +11,19 @@ struct Release: Decodable {
 }
 
 // MARK: - Updater
-// Security model: standard TLS (macOS system trust store) + SHA256 checksum + codesign TeamID verify + notarization.
-// Cert pinning intentionally omitted — GitHub rotates certs without notice, which would silently
-// break updates for all existing installs. The downloaded DMG signature is the real integrity check.
+// Security model:
+//   L1: Standard TLS (macOS system trust store)
+//   L2: Ed25519 signature on SHA256 checksum (private key in SM, public key hardcoded below)
+//   L3: SHA256 checksum of DMG
+//   L4: codesign TeamID verification (RLPRR8CPQG)
+//   L5: Apple notarization stapled to DMG
+//
+// Even if GitHub is fully compromised, an attacker cannot forge a valid Ed25519 signature
+// without the private key stored in AWS Secrets Manager.
+
+// Ed25519 public key — DER encoded, base64. Generated 2026-08-07.
+// Corresponding private key in SM: /infra/apple/update-signing-key
+private let updatePublicKeyB64 = "MCowBQYDK2VwAyEA9aT3lXqgqgD2NyCH7S7nJ7MANFPOb9oL+8u9K1sWp28="
 
 class Updater {
     static let repoAPI = "https://api.github.com/repos/zodl-inc/poc-macos-dmg/releases/latest"
@@ -54,14 +64,16 @@ class Updater {
                 return
             }
 
-            let dmgAsset = release.assets.first(where: { $0.name.hasSuffix(".dmg") })
+            let dmgAsset   = release.assets.first(where: { $0.name.hasSuffix(".dmg") })
             let sha256Asset = release.assets.first(where: { $0.name.hasSuffix(".sha256") })
-            log("📎 Assets found: DMG=\(dmgAsset?.name ?? "MISSING") sha256=\(sha256Asset?.name ?? "MISSING")")
+            let sigAsset    = release.assets.first(where: { $0.name.hasSuffix(".sha256.sig.b64") })
+            log("📎 Assets: DMG=\(dmgAsset?.name ?? "MISSING") sha256=\(sha256Asset?.name ?? "MISSING") sig=\(sigAsset?.name ?? "MISSING")")
 
-            guard let dmgAsset, let sha256Asset,
-                  let dmgURL = URL(string: dmgAsset.browser_download_url),
-                  let sha256URL = URL(string: sha256Asset.browser_download_url) else {
-                log("❌ Missing DMG or .sha256 asset")
+            guard let dmgAsset, let sha256Asset, let sigAsset,
+                  let dmgURL    = URL(string: dmgAsset.browser_download_url),
+                  let sha256URL = URL(string: sha256Asset.browser_download_url),
+                  let sigURL    = URL(string: sigAsset.browser_download_url) else {
+                log("❌ Missing required assets (DMG, .sha256, or .sha256.sig.b64)")
                 return
             }
 
@@ -74,20 +86,42 @@ class Updater {
                 alert.alertStyle = .informational
                 if alert.runModal() == .alertFirstButtonReturn {
                     downloadAndInstall(dmgURL: dmgURL, sha256URL: sha256URL,
-                                       version: latest, log: log)
+                                       sigURL: sigURL, version: latest, log: log)
                 }
             }
         }.resume()
     }
 
-    private static func downloadAndInstall(dmgURL: URL, sha256URL: URL,
+    private static func verifyEd25519(data: Data, signatureB64: String, log: (String) -> Void) -> Bool {
+        guard let pubKeyDER = Data(base64Encoded: updatePublicKeyB64),
+              let sigData = Data(base64Encoded: signatureB64) else {
+            log("❌ Ed25519: failed to decode key or signature")
+            return false
+        }
+        // Import DER public key via SecKey
+        let attrs: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeEdDSA,
+            kSecAttrKeyClass as String: kSecAttrKeyClassPublic,
+        ]
+        var error: Unmanaged<CFError>?
+        guard let secKey = SecKeyCreateWithData(pubKeyDER as CFData, attrs as CFDictionary, &error) else {
+            log("❌ Ed25519: SecKeyCreateWithData failed — \(error?.takeRetainedValue().localizedDescription ?? "?")")
+            return false
+        }
+        let ok = SecKeyVerifySignature(secKey, .edDSASignatureRaw, data as CFData, sigData as CFData, &error)
+        if ok { log("✅ Ed25519 signature verified") }
+        else   { log("❌ Ed25519 signature INVALID — \(error?.takeRetainedValue().localizedDescription ?? "?")") }
+        return ok
+    }
+
+    private static func downloadAndInstall(dmgURL: URL, sha256URL: URL, sigURL: URL,
                                             version: String,
                                             log: @escaping (String) -> Void) {
         let session = URLSession.shared
         let dmgDest = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("HelloWorld-\(version).dmg")
 
-        log("📥 Fetching checksum...")
+        log("📥 Fetching checksum + signature...")
         guard let sha256Data = try? Data(contentsOf: sha256URL),
               let sha256Line = String(data: sha256Data, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -95,7 +129,17 @@ class Updater {
             log("❌ Couldn't fetch .sha256")
             return
         }
+        guard let sigB64Raw = try? String(contentsOf: sigURL, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) else {
+            log("❌ Couldn't fetch .sha256.sig.b64")
+            return
+        }
         log("🔢 Expected SHA256: \(sha256Line)")
+        log("🔏 Verifying Ed25519 signature on checksum...")
+        guard verifyEd25519(data: sha256Data, signatureB64: sigB64Raw, log: log) else {
+            log("❌ Ed25519 verification failed — aborting")
+            return
+        }
 
         log("📥 Downloading DMG...")
         session.downloadTask(with: dmgURL) { tmp, _, error in
