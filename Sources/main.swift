@@ -18,7 +18,7 @@ label.alignment = .center
 label.frame = NSRect(x: 0, y: 70, width: 400, height: 60)
 window.contentView?.addSubview(label)
 
-let version = NSTextField(labelWithString: "v1.0.5")
+let version = NSTextField(labelWithString: "v1.0.6")
 version.font = NSFont.systemFont(ofSize: 12)
 version.textColor = .secondaryLabelColor
 version.alignment = .center
@@ -28,9 +28,12 @@ window.contentView?.addSubview(version)
 window.makeKeyAndOrderFront(nil)
 app.activate(ignoringOtherApps: true)
 
-// Check for updates once at launch, after window appears
+// Check 3s after launch, then every hour while open
 DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
     Updater.checkAndUpdate()
+}
+Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { _ in
+    DispatchQueue.global().async { Updater.checkAndUpdate() }
 }
 
 app.run()
