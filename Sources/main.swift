@@ -18,7 +18,7 @@ label.alignment = .center
 label.frame = NSRect(x: 0, y: 70, width: 400, height: 60)
 window.contentView?.addSubview(label)
 
-let version = NSTextField(labelWithString: "v1.0.7")
+let version = NSTextField(labelWithString: "v1.0.8")
 version.font = NSFont.systemFont(ofSize: 12)
 version.textColor = .secondaryLabelColor
 version.alignment = .center
