@@ -26,10 +26,12 @@ struct Release: Decodable {
 
 // GitHub's current SPKI SHA-256 hashes (as of 2026-08-07, Sectigo chain)
 // Update these after GitHub rotates their key (OCSP fallback handles the transition window)
+// Hashes computed via scripts/get-spki-hashes.swift on macos-15 GitHub Actions runner (2026-08-07)
+// Intermediate + root pinned as backup — survives leaf cert rotation if key stays the same
 private let pinnedSPKIHashes: Set<String> = [
-    "rlkAiJEjAwr5USvccZ2NlLzz7elZETOabSnkRvKdow0=", // *.github.com leaf
-    "ZSagvDzjltLkewXEBuDxIzpW/dpVw1Juvvmd0hhkzdY=", // Sectigo Public Server Authentication CA DV E36
-    "sLVjNUaFYfW7n6EtgBeEpjOlcnBdNPMrZDRF36iwBdE=", // Sectigo Public Server Authentication Root E46
+    "EfXAzYKYsOsdi115+whKa+Yntz0T55fOk7iirLhX7rc=", // *.github.com leaf
+    "VqePxH3EcFwZuYK3CCOMz5HKMoeIZpZcEyBf4diPGSA=", // Sectigo Public Server Authentication CA DV E36
+    "EdsvlytFf4a/O+hCPwBXFFi46RKXqivCAF+mO7s+5Ng=", // Sectigo Public Server Authentication Root E46
 ]
 
 class PinningDelegate: NSObject, URLSessionDelegate {
