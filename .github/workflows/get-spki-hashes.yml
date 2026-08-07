@@ -1,0 +1,12 @@
+name: Get SPKI Hashes
+
+on:
+  workflow_dispatch:
+
+jobs:
+  get-hashes:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get SPKI hashes from api.github.com
+        run: swift scripts/get-spki-hashes.swift
