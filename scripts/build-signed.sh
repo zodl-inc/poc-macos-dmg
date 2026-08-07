@@ -44,9 +44,9 @@ hdiutil create \
 echo "==> Signing DMG..."
 codesign --force --sign "$IDENTITY" "$BUILD_DIR/$APP_NAME-$VERSION.dmg"
 
+echo "==> Generating SHA256 checksum..."
+shasum -a 256 "$BUILD_DIR/$APP_NAME-$VERSION.dmg" | awk '{print $1}' > "$BUILD_DIR/$APP_NAME-$VERSION.sha256"
+echo "  $(cat "$BUILD_DIR/$APP_NAME-$VERSION.sha256")  $APP_NAME-$VERSION.dmg"
+
 echo ""
-echo "✅ Done: build/$APP_NAME-$VERSION.dmg (signed)"
-echo ""
-echo "Next step for notarization (optional, needs Apple ID creds):"
-echo "  xcrun notarytool submit build/$APP_NAME-$VERSION.dmg --apple-id ... --team-id RLPRR8CPQG --wait"
-echo "  xcrun stapler staple build/$APP_NAME-$VERSION.dmg"
+echo "✅ Done: build/$APP_NAME-$VERSION.dmg (signed) + .sha256"
