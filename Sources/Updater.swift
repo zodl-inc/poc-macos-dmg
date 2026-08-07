@@ -1,4 +1,4 @@
-import Foundation
+import Cocoa
 
 // Minimal self-updater — polls a static JSON on GitHub, downloads DMG, installs, relaunches.
 // Drop Sparkle in Info.plist (SUFeedURL) instead of this for production.
