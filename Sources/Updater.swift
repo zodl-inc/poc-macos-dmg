@@ -78,9 +78,10 @@ class PinningDelegate: NSObject, URLSessionDelegate {
         )
         let basicPolicy = SecPolicyCreateSSL(true, "api.github.com" as CFString)
 
+        let certChain = SecTrustCopyCertificateChain(serverTrust) as! [SecCertificate]
         var newTrust: SecTrust?
         guard SecTrustCreateWithCertificates(
-            SecTrustCopyCertificateChain(serverTrust),
+            certChain as CFArray,
             [basicPolicy, revocationPolicy] as CFArray,
             &newTrust
         ) == errSecSuccess, let newTrust else {
