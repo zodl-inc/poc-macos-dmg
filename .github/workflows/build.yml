@@ -1,0 +1,23 @@
+name: Build DMG
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15        # Apple Silicon runner (M-series, free for public repos)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build app + DMG
+        run: chmod +x scripts/build.sh && ./scripts/build.sh
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HelloWorld-dmg
+          path: build/HelloWorld-*.dmg
+          retention-days: 7

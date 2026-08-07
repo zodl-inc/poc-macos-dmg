@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          # Patch version into Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" Resources/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" Resources/Info.plist
+
+      - name: Build app + DMG
+        run: chmod +x scripts/build.sh && ./scripts/build.sh
+
+      - name: Create GitHub Release and upload DMG
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/HelloWorld-*.dmg
+          generate_release_notes: false
+          body: |
+            ## HelloWorld ${{ env.VERSION }}
+
+            ### Install
+            Download the `.dmg`, open it, drag **HelloWorld.app** to Applications.
+
+            > **Note:** Ad-hoc signed (no notarization on this POC).
+            > Right-click → Open to bypass Gatekeeper on first launch.
+
+            ### Auto-update
+            The app checks `appcast.xml` on startup and will prompt to update when a new version is released.
