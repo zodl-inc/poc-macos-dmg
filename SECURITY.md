@@ -2,26 +2,15 @@
 
 ## Auto-update security model
 
-Every update goes through 4 independent layers before any code runs on the user's machine.
+Every update goes through 3 independent layers before any code runs on the user's machine.
 
-### Layer 1 — TLS + Certificate Pinning
+### Layer 1 — Standard TLS (macOS system trust store)
 
-All network requests (update check + DMG download) use a custom `URLSessionDelegate` that:
+All network requests use `URLSession.shared` which validates GitHub's certificate chain against the macOS system trust store (managed by Apple, updated via OS updates).
 
-1. Performs standard TLS chain validation (macOS SecTrust)
-2. Additionally verifies that at least one certificate in the chain matches a pinned SPKI SHA-256 hash
+**Why not cert pinning?** GitHub rotates certs without advance notice. Pinning would silently break updates for all existing installs the moment GitHub renews their cert — users would be stuck on an old version with no way to self-update. The downloaded DMG signature (Layer 3) is the real integrity guarantee, not the transport layer.
 
-Pinned chain (Sectigo CAs used by GitHub, as of 2026-08-07):
-```
-rlkAiJEjAwr5USvccZ2NlLzz7elZETOabSnkRvKdow0=  *.github.com (leaf)
-ZSagvDzjltLkewXEBuDxIzpW/dpVw1Juvvmd0hhkzdY=  Sectigo Public Server Authentication CA DV E36
-sLVjNUaFYfW7n6EtgBeEpjOlcnBdNPMrZDRF36iwBdE=  Sectigo Public Server Authentication Root E46
-```
-
-We pin intermediates (not the leaf) so routine cert rotation doesn't break updates.
-If GitHub migrates to a new CA chain, update `pinnedSPKIHashes` in `Sources/Updater.swift`.
-
-**What this prevents:** MITM attacks that substitute a rogue TLS certificate.
+**What this prevents:** Standard MITM attacks (forged TLS cert not trusted by Apple's root store).
 
 ---
 

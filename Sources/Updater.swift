@@ -1,6 +1,5 @@
 import Cocoa
 import CryptoKit
-import Security
 
 struct Release: Decodable {
     let tag_name: String
@@ -11,69 +10,10 @@ struct Release: Decodable {
     }
 }
 
-// MARK: - Certificate Pinning
-
-private let pinnedSPKIHashes: Set<String> = [
-    "rlkAiJEjAwr5USvccZ2NlLzz7elZETOabSnkRvKdow0=", // *.github.com leaf
-    "ZSagvDzjltLkewXEBuDxIzpW/dpVw1Juvvmd0hhkzdY=", // Sectigo Public Server Authentication CA DV E36
-    "sLVjNUaFYfW7n6EtgBeEpjOlcnBdNPMrZDRF36iwBdE=", // Sectigo Public Server Authentication Root E46
-]
-
-class PinningDelegate: NSObject, URLSessionDelegate {
-    let log: (String) -> Void
-    init(log: @escaping (String) -> Void) { self.log = log }
-
-    func urlSession(_ session: URLSession,
-                    didReceive challenge: URLAuthenticationChallenge,
-                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-              let serverTrust = challenge.protectionSpace.serverTrust else {
-            log("❌ TLS: unexpected auth method")
-            completionHandler(.cancelAuthenticationChallenge, nil)
-            return
-        }
-
-        var error: CFError?
-        guard SecTrustEvaluateWithError(serverTrust, &error) else {
-            log("❌ TLS: chain validation failed — \(error?.localizedDescription ?? "unknown")")
-            completionHandler(.cancelAuthenticationChallenge, nil)
-            return
-        }
-
-        let certCount = SecTrustGetCertificateCount(serverTrust)
-        log("🔒 TLS: chain has \(certCount) certs, checking SPKI pins...")
-        for i in 0..<certCount {
-            guard let cert = SecTrustGetCertificateAtIndex(serverTrust, i) else { continue }
-            if let spkiHash = spkiSHA256(from: cert) {
-                let match = pinnedSPKIHashes.contains(spkiHash)
-                log("  cert[\(i)] SPKI: \(spkiHash) \(match ? "✅ MATCH" : "")")
-                if match {
-                    completionHandler(.useCredential, URLCredential(trust: serverTrust))
-                    return
-                }
-            }
-        }
-
-        log("⚠️ TLS: no pinned match found — allowing for diagnostics (NOT for production)")
-        completionHandler(.useCredential, URLCredential(trust: serverTrust))
-    }
-
-    private func spkiSHA256(from cert: SecCertificate) -> String? {
-        var key: SecKey?
-        var trust: SecTrust?
-        let policy = SecPolicyCreateBasicX509()
-        SecTrustCreateWithCertificates(cert, policy, &trust)
-        if let trust = trust {
-            SecTrustEvaluateWithError(trust, nil)
-            key = SecTrustCopyKey(trust)
-        }
-        guard let publicKey = key,
-              let keyData = SecKeyCopyExternalRepresentation(publicKey, nil) as Data? else { return nil }
-        return Data(SHA256.hash(data: keyData)).base64EncodedString()
-    }
-}
-
 // MARK: - Updater
+// Security model: standard TLS (macOS system trust store) + SHA256 checksum + codesign TeamID verify + notarization.
+// Cert pinning intentionally omitted — GitHub rotates certs without notice, which would silently
+// break updates for all existing installs. The downloaded DMG signature is the real integrity check.
 
 class Updater {
     static let repoAPI = "https://api.github.com/repos/zodl-inc/poc-macos-dmg/releases/latest"
@@ -82,9 +22,7 @@ class Updater {
 
     static func checkAndUpdate(log: @escaping (String) -> Void) {
         log("🔍 Checking for updates (current: v\(currentVersion))...")
-
-        let delegate = PinningDelegate(log: log)
-        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        let session = URLSession.shared
 
         guard let url = URL(string: repoAPI) else { return }
         var req = URLRequest(url: url)
@@ -136,7 +74,7 @@ class Updater {
                 alert.alertStyle = .informational
                 if alert.runModal() == .alertFirstButtonReturn {
                     downloadAndInstall(dmgURL: dmgURL, sha256URL: sha256URL,
-                                       version: latest, session: session, log: log)
+                                       version: latest, log: log)
                 }
             }
         }.resume()
@@ -144,8 +82,8 @@ class Updater {
 
     private static func downloadAndInstall(dmgURL: URL, sha256URL: URL,
                                             version: String,
-                                            session: URLSession,
                                             log: @escaping (String) -> Void) {
+        let session = URLSession.shared
         let dmgDest = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("HelloWorld-\(version).dmg")
 
