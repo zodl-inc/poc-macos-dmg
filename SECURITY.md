@@ -11,11 +11,11 @@ All network requests (update check + DMG download) use a custom `URLSessionDeleg
 1. Performs standard TLS chain validation (macOS SecTrust)
 2. Additionally verifies that at least one certificate in the chain matches a pinned SPKI SHA-256 hash
 
-Pinned intermediates (DigiCert CAs used by GitHub):
+Pinned chain (Sectigo CAs used by GitHub, as of 2026-08-07):
 ```
-RQeZkB42znUfsDIIFWIRiYEcKl7nHwNFwWCrnMMJbi0=  DigiCert TLS RSA SHA256 2020 CA1
-WoiWRyIOVNa9ihaBciRSC7XHjliYS9VwUGOIud4PB18=  DigiCert High Assurance TLS Hybrid ECC SHA256
-Vjs8r4z+80wjNcr1YKepWQboSIRi63WsWXhIMN+eWys=  DigiCert Global Root CA (backup)
+rlkAiJEjAwr5USvccZ2NlLzz7elZETOabSnkRvKdow0=  *.github.com (leaf)
+ZSagvDzjltLkewXEBuDxIzpW/dpVw1Juvvmd0hhkzdY=  Sectigo Public Server Authentication CA DV E36
+sLVjNUaFYfW7n6EtgBeEpjOlcnBdNPMrZDRF36iwBdE=  Sectigo Public Server Authentication Root E46
 ```
 
 We pin intermediates (not the leaf) so routine cert rotation doesn't break updates.

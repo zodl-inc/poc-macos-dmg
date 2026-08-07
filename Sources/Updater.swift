@@ -18,9 +18,9 @@ struct Release: Decodable {
 // Update this list if GitHub migrates to a new CA chain.
 // To get current hashes: openssl s_client -connect api.github.com:443 | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64
 private let pinnedSPKIHashes: Set<String> = [
-    "RQeZkB42znUfsDIIFWIRiYEcKl7nHwNFwWCrnMMJbi0=", // DigiCert TLS RSA SHA256 2020 CA1
-    "WoiWRyIOVNa9ihaBciRSC7XHjliYS9VwUGOIud4PB18=", // DigiCert High Assurance TLS Hybrid ECC SHA256
-    "Vjs8r4z+80wjNcr1YKepWQboSIRi63WsWXhIMN+eWys=", // DigiCert Global Root CA (backup)
+    "rlkAiJEjAwr5USvccZ2NlLzz7elZETOabSnkRvKdow0=", // *.github.com leaf
+    "ZSagvDzjltLkewXEBuDxIzpW/dpVw1Juvvmd0hhkzdY=", // Sectigo Public Server Authentication CA DV E36
+    "sLVjNUaFYfW7n6EtgBeEpjOlcnBdNPMrZDRF36iwBdE=", // Sectigo Public Server Authentication Root E46
 ]
 
 class PinningDelegate: NSObject, URLSessionDelegate {
