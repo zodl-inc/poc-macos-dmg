@@ -72,7 +72,8 @@ jobs:
             > /tmp/update_signing_key.pem
 
           SHA256_FILE=$(ls build/HelloWorld-*.sha256)
-          pip3 install cryptography --quiet
+          pip3 install cryptography --quiet --break-system-packages 2>/dev/null || \
+            pip3 install cryptography --quiet
           python3 scripts/sign-checksum.py /tmp/update_signing_key.pem "$SHA256_FILE"
           rm /tmp/update_signing_key.pem
 
