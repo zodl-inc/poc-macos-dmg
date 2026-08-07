@@ -6,14 +6,42 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
   build:
-    runs-on: macos-15        # Apple Silicon runner (M-series, free for public repos)
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build app + DMG
-        run: chmod +x scripts/build.sh && ./scripts/build.sh
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::907793002116:role/poc-macos-dmg-gha
+          aws-region: us-east-1
+
+      - name: Import Developer ID certificate from SM
+        run: |
+          SECRET=$(aws secretsmanager get-secret-value \
+            --secret-id /infra/apple/developer-id-macos \
+            --query SecretString --output text)
+          P12_B64=$(echo "$SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['p12_base64'])")
+          P12_PASS=$(echo "$SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['p12_password'])")
+          echo "$P12_B64" | base64 --decode > /tmp/cert.p12
+          # Import into a temporary keychain so it doesn't touch the login keychain
+          security create-keychain -p ci-keychain /tmp/ci.keychain
+          security default-keychain -s /tmp/ci.keychain
+          security unlock-keychain -p ci-keychain /tmp/ci.keychain
+          security import /tmp/cert.p12 -k /tmp/ci.keychain -P "$P12_PASS" \
+            -T /usr/bin/codesign -T /usr/bin/productbuild
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci-keychain /tmp/ci.keychain
+          security set-keychain-settings -lut 3600 /tmp/ci.keychain
+          rm /tmp/cert.p12
+
+      - name: Build app + sign + DMG
+        run: chmod +x scripts/build-signed.sh && ./scripts/build-signed.sh
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4

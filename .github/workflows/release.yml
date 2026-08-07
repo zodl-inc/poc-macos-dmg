@@ -6,6 +6,7 @@ on:
       - 'v*'
 
 permissions:
+  id-token: write
   contents: write
 
 jobs:
@@ -18,12 +19,34 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           echo "VERSION=$VERSION" >> $GITHUB_ENV
-          # Patch version into Info.plist
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" Resources/Info.plist
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" Resources/Info.plist
 
-      - name: Build app + DMG
-        run: chmod +x scripts/build.sh && ./scripts/build.sh
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::907793002116:role/poc-macos-dmg-gha
+          aws-region: us-east-1
+
+      - name: Import Developer ID certificate from SM
+        run: |
+          SECRET=$(aws secretsmanager get-secret-value \
+            --secret-id /infra/apple/developer-id-macos \
+            --query SecretString --output text)
+          P12_B64=$(echo "$SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['p12_base64'])")
+          P12_PASS=$(echo "$SECRET" | python3 -c "import json,sys; print(json.load(sys.stdin)['p12_password'])")
+          echo "$P12_B64" | base64 --decode > /tmp/cert.p12
+          security create-keychain -p ci-keychain /tmp/ci.keychain
+          security default-keychain -s /tmp/ci.keychain
+          security unlock-keychain -p ci-keychain /tmp/ci.keychain
+          security import /tmp/cert.p12 -k /tmp/ci.keychain -P "$P12_PASS" \
+            -T /usr/bin/codesign -T /usr/bin/productbuild
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci-keychain /tmp/ci.keychain
+          security set-keychain-settings -lut 3600 /tmp/ci.keychain
+          rm /tmp/cert.p12
+
+      - name: Build app + sign + DMG
+        run: chmod +x scripts/build-signed.sh && ./scripts/build-signed.sh
 
       - name: Create GitHub Release and upload DMG
         uses: softprops/action-gh-release@v2
@@ -33,11 +56,11 @@ jobs:
           body: |
             ## HelloWorld ${{ env.VERSION }}
 
+            Signed with **Developer ID Application** (ECC / RLPRR8CPQG).
+
             ### Install
             Download the `.dmg`, open it, drag **HelloWorld.app** to Applications.
-
-            > **Note:** Ad-hoc signed (no notarization on this POC).
-            > Right-click → Open to bypass Gatekeeper on first launch.
+            No Gatekeeper warning — properly signed.
 
             ### Auto-update
-            The app checks `appcast.xml` on startup and will prompt to update when a new version is released.
+            The app checks for updates on every launch and prompts before installing.

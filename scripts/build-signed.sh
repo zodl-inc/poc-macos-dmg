@@ -1,0 +1,45 @@
+#!/bin/bash
+# Build HelloWorld.app, sign with Developer ID, create signed DMG.
+# Requires: Xcode CLI tools + Developer ID Application cert in keychain.
+set -e
+
+APP_NAME="HelloWorld"
+VERSION=$(defaults read "$(pwd)/Resources/Info.plist" CFBundleShortVersionString 2>/dev/null || echo "1.0.0")
+BUILD_DIR="build"
+IDENTITY="Developer ID Application: The Zerocoin Electric Coin Company LLC (RLPRR8CPQG)"
+
+echo "==> Building HelloWorld v$VERSION..."
+rm -rf "$BUILD_DIR"
+mkdir -p "$BUILD_DIR/$APP_NAME.app/Contents/MacOS"
+mkdir -p "$BUILD_DIR/$APP_NAME.app/Contents/Resources"
+
+swiftc Sources/main.swift Sources/Updater.swift \
+    -o "$BUILD_DIR/$APP_NAME.app/Contents/MacOS/$APP_NAME" \
+    -target arm64-apple-macosx13.0 \
+    -sdk "$(xcrun --sdk macosx --show-sdk-path)"
+
+cp Resources/Info.plist "$BUILD_DIR/$APP_NAME.app/Contents/Info.plist"
+
+echo "==> Signing with Developer ID..."
+codesign --force --deep --options runtime \
+    --sign "$IDENTITY" \
+    "$BUILD_DIR/$APP_NAME.app"
+
+codesign --verify --deep --strict "$BUILD_DIR/$APP_NAME.app" && echo "  Signature OK"
+
+echo "==> Building signed DMG..."
+hdiutil create \
+    -volname "$APP_NAME" \
+    -srcfolder "$BUILD_DIR/$APP_NAME.app" \
+    -ov -format UDZO \
+    -o "$BUILD_DIR/$APP_NAME-$VERSION.dmg"
+
+echo "==> Signing DMG..."
+codesign --force --sign "$IDENTITY" "$BUILD_DIR/$APP_NAME-$VERSION.dmg"
+
+echo ""
+echo "✅ Done: build/$APP_NAME-$VERSION.dmg (signed)"
+echo ""
+echo "Next step for notarization (optional, needs Apple ID creds):"
+echo "  xcrun notarytool submit build/$APP_NAME-$VERSION.dmg --apple-id ... --team-id RLPRR8CPQG --wait"
+echo "  xcrun stapler staple build/$APP_NAME-$VERSION.dmg"
