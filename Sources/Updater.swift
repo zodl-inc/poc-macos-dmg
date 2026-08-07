@@ -1,9 +1,5 @@
 import Cocoa
 
-// Minimal self-updater — polls a static JSON on GitHub, downloads DMG, installs, relaunches.
-// Drop Sparkle in Info.plist (SUFeedURL) instead of this for production.
-// This is for understanding how it works without a framework.
-
 struct Release: Decodable {
     let tag_name: String
     let assets: [Asset]
@@ -35,7 +31,6 @@ class Updater {
             guard let dmgAsset = release.assets.first(where: { $0.name.hasSuffix(".dmg") }),
                   let dmgURL = URL(string: dmgAsset.browser_download_url) else { return }
 
-            print("New version \(latest) available")
             DispatchQueue.main.async {
                 let alert = NSAlert()
                 alert.messageText = "Update available — v\(latest)"
@@ -51,43 +46,81 @@ class Updater {
     }
 
     private static func downloadAndInstall(dmgURL: URL, version: String) {
-        let dest = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("HelloWorld-\(version).dmg")
+        let dmgDest = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("HelloWorld-\(version).dmg")
 
         URLSession.shared.downloadTask(with: dmgURL) { tmp, _, _ in
             guard let tmp else { return }
-            try? FileManager.default.moveItem(at: tmp, to: dest)
+            try? FileManager.default.moveItem(at: tmp, to: dmgDest)
 
-            // Mount DMG
-            let mount = Process()
-            mount.launchPath = "/usr/bin/hdiutil"
-            mount.arguments = ["attach", dest.path, "-nobrowse", "-quiet"]
-            mount.launch(); mount.waitUntilExit()
+            // Remove quarantine from the downloaded DMG first
+            run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", dmgDest.path])
 
-            // Find mount point
-            let mountPoint = "/Volumes/HelloWorld"
+            // Mount DMG (no auto-open, no browse)
+            let mountOutput = runOutput("/usr/bin/hdiutil", [
+                "attach", dmgDest.path, "-nobrowse", "-quiet", "-plist"
+            ])
+
+            // Parse mount point from plist output
+            let mountPoint = parseMountPoint(mountOutput) ?? "/Volumes/HelloWorld"
             let sourceApp = "\(mountPoint)/HelloWorld.app"
             let destApp = "/Applications/HelloWorld.app"
 
-            // Replace app (requires no sandbox — see README)
-            let install = Process()
-            install.launchPath = "/bin/sh"
-            install.arguments = ["-c", "rm -rf '\(destApp)' && cp -R '\(sourceApp)' '\(destApp)'"]
-            install.launch(); install.waitUntilExit()
+            // Install: use osascript to get admin privileges for writing to /Applications
+            let script = """
+            do shell script "rm -rf '\(destApp)' && cp -R '\(sourceApp)' '\(destApp)' && xattr -dr com.apple.quarantine '\(destApp)'" with administrator privileges
+            """
+            let installResult = runOutput("/usr/bin/osascript", ["-e", script])
+            print("Install result:", installResult)
 
             // Detach DMG
-            let detach = Process()
-            detach.launchPath = "/usr/bin/hdiutil"
-            detach.arguments = ["detach", mountPoint, "-quiet"]
-            detach.launch(); detach.waitUntilExit()
+            run("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"])
 
-            // Relaunch new version
+            // Relaunch
             DispatchQueue.main.async {
-                let relaunch = Process()
-                relaunch.launchPath = "/usr/bin/open"
-                relaunch.arguments = [destApp]
-                relaunch.launch()
+                let p = Process()
+                p.launchPath = "/usr/bin/open"
+                p.arguments = [destApp]
+                p.launch()
                 NSApplication.shared.terminate(nil)
             }
         }.resume()
+    }
+
+    // Run a process and discard output
+    @discardableResult
+    private static func run(_ path: String, _ args: [String]) -> Int32 {
+        let p = Process()
+        p.launchPath = path
+        p.arguments = args
+        p.launch()
+        p.waitUntilExit()
+        return p.terminationStatus
+    }
+
+    // Run a process and capture stdout
+    private static func runOutput(_ path: String, _ args: [String]) -> String {
+        let p = Process()
+        p.launchPath = path
+        p.arguments = args
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.launch()
+        p.waitUntilExit()
+        return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    }
+
+    // Parse hdiutil -plist output to find the actual mount point
+    private static func parseMountPoint(_ plistString: String) -> String? {
+        guard let data = plistString.data(using: .utf8),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil),
+              let dict = plist as? [String: Any],
+              let entities = dict["system-entities"] as? [[String: Any]] else { return nil }
+        for entity in entities {
+            if let mountPoint = entity["mount-point"] as? String {
+                return mountPoint
+            }
+        }
+        return nil
     }
 }
