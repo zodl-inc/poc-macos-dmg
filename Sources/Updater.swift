@@ -93,25 +93,24 @@ class Updater {
     }
 
     private static func verifyEd25519(data: Data, signatureB64: String, log: (String) -> Void) -> Bool {
+        // CryptoKit Curve25519 (Ed25519) — strip the 12-byte DER header to get the raw 32-byte key
         guard let pubKeyDER = Data(base64Encoded: updatePublicKeyB64),
+              pubKeyDER.count == 44,
               let sigData = Data(base64Encoded: signatureB64) else {
             log("❌ Ed25519: failed to decode key or signature")
             return false
         }
-        // Import DER public key via SecKey
-        let attrs: [String: Any] = [
-            kSecAttrKeyType as String: kSecAttrKeyTypeEdDSA,
-            kSecAttrKeyClass as String: kSecAttrKeyClassPublic,
-        ]
-        var error: Unmanaged<CFError>?
-        guard let secKey = SecKeyCreateWithData(pubKeyDER as CFData, attrs as CFDictionary, &error) else {
-            log("❌ Ed25519: SecKeyCreateWithData failed — \(error?.takeRetainedValue().localizedDescription ?? "?")")
+        let rawKey = pubKeyDER.suffix(32) // DER prefix is 12 bytes for Ed25519
+        do {
+            let publicKey = try Curve25519.Signing.PublicKey(rawRepresentation: rawKey)
+            let ok = publicKey.isValidSignature(sigData, for: data)
+            if ok { log("✅ Ed25519 signature verified") }
+            else  { log("❌ Ed25519 signature INVALID") }
+            return ok
+        } catch {
+            log("❌ Ed25519: \(error.localizedDescription)")
             return false
         }
-        let ok = SecKeyVerifySignature(secKey, .edDSASignatureRaw, data as CFData, sigData as CFData, &error)
-        if ok { log("✅ Ed25519 signature verified") }
-        else   { log("❌ Ed25519 signature INVALID — \(error?.takeRetainedValue().localizedDescription ?? "?")") }
-        return ok
     }
 
     private static func downloadAndInstall(dmgURL: URL, sha256URL: URL, sigURL: URL,
@@ -129,8 +128,8 @@ class Updater {
             log("❌ Couldn't fetch .sha256")
             return
         }
-        guard let sigB64Raw = try? String(contentsOf: sigURL, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) else {
+        guard let sigB64Raw = try? String(contentsOf: sigURL, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines), !sigB64Raw.isEmpty else {
             log("❌ Couldn't fetch .sha256.sig.b64")
             return
         }
