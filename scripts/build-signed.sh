@@ -33,6 +33,7 @@ rm -rf "$DMG_STAGING"
 mkdir -p "$DMG_STAGING"
 cp -R "$BUILD_DIR/$APP_NAME.app" "$DMG_STAGING/"
 ln -s /Applications "$DMG_STAGING/Applications"
+# Note: auto-update installs to ~/Applications (no admin needed)
 
 hdiutil create \
     -volname "$APP_NAME" \

@@ -64,14 +64,13 @@ class Updater {
             // Parse mount point from plist output
             let mountPoint = parseMountPoint(mountOutput) ?? "/Volumes/HelloWorld"
             let sourceApp = "\(mountPoint)/HelloWorld.app"
-            let destApp = "/Applications/HelloWorld.app"
+            let homeApps = "\(NSHomeDirectory())/Applications"
+            let destApp = "\(homeApps)/HelloWorld.app"
 
-            // Install: use osascript to get admin privileges for writing to /Applications
-            let script = """
-            do shell script "rm -rf '\(destApp)' && cp -R '\(sourceApp)' '\(destApp)' && xattr -dr com.apple.quarantine '\(destApp)'" with administrator privileges
-            """
-            let installResult = runOutput("/usr/bin/osascript", ["-e", script])
-            print("Install result:", installResult)
+            // Install to ~/Applications (no admin password needed)
+            run("/bin/mkdir", ["-p", homeApps])
+            run("/bin/sh", ["-c", "rm -rf '\(destApp)' && cp -R '\(sourceApp)' '\(destApp)'"])
+            run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", destApp])
 
             // Detach DMG
             run("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"])
