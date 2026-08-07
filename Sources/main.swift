@@ -28,12 +28,9 @@ window.contentView?.addSubview(version)
 window.makeKeyAndOrderFront(nil)
 app.activate(ignoringOtherApplications: true)
 
-// Check for updates at launch (after 3s so window appears first) and every hour
+// Check for updates once at launch, after window appears
 DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
     Updater.checkAndUpdate()
-}
-Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { _ in
-    DispatchQueue.global().async { Updater.checkAndUpdate() }
 }
 
 app.run()
