@@ -16,7 +16,7 @@ mkdir -p "$BUILD_DIR/$APP_NAME.app/Contents/MacOS"
 mkdir -p "$BUILD_DIR/$APP_NAME.app/Contents/Resources"
 
 echo "==> Compiling Swift (arm64)..."
-swiftc Sources/main.swift \
+swiftc Sources/main.swift Sources/Updater.swift \
     -o "$BUILD_DIR/$APP_NAME.app/Contents/MacOS/$APP_NAME" \
     -target arm64-apple-macosx13.0 \
     -sdk "$(xcrun --sdk macosx --show-sdk-path)"

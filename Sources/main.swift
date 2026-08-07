@@ -26,7 +26,7 @@ version.frame = NSRect(x: 0, y: 40, width: 400, height: 20)
 window.contentView?.addSubview(version)
 
 window.makeKeyAndOrderFront(nil)
-app.activate(ignoringOtherApplications: true)
+app.activate(ignoringOtherApps: true)
 
 // Check for updates once at launch, after window appears
 DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
