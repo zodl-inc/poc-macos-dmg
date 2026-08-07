@@ -18,7 +18,7 @@ label.alignment = .center
 label.frame = NSRect(x: 0, y: 360, width: 500, height: 50)
 window.contentView?.addSubview(label)
 
-let version = NSTextField(labelWithString: "v1.0.17")
+let version = NSTextField(labelWithString: "v1.0.18")
 version.font = NSFont.systemFont(ofSize: 12)
 version.textColor = .secondaryLabelColor
 version.alignment = .center
@@ -57,7 +57,7 @@ func log(_ msg: String) {
 
 window.makeKeyAndOrderFront(nil)
 app.activate(ignoringOtherApps: true)
-log("App started — v1.0.17")
+log("App started — v1.0.18")
 
 DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
     Updater.checkAndUpdate(log: log)
