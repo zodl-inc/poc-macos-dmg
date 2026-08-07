@@ -27,10 +27,16 @@ codesign --force --deep --options runtime \
 
 codesign --verify --deep --strict "$BUILD_DIR/$APP_NAME.app" && echo "  Signature OK"
 
-echo "==> Building signed DMG..."
+echo "==> Building signed DMG (with Applications symlink)..."
+DMG_STAGING="$BUILD_DIR/dmg-staging"
+rm -rf "$DMG_STAGING"
+mkdir -p "$DMG_STAGING"
+cp -R "$BUILD_DIR/$APP_NAME.app" "$DMG_STAGING/"
+ln -s /Applications "$DMG_STAGING/Applications"
+
 hdiutil create \
     -volname "$APP_NAME" \
-    -srcfolder "$BUILD_DIR/$APP_NAME.app" \
+    -srcfolder "$DMG_STAGING" \
     -ov -format UDZO \
     -o "$BUILD_DIR/$APP_NAME-$VERSION.dmg"
 
