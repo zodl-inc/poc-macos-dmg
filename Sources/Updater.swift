@@ -35,8 +35,18 @@ class Updater {
             guard let dmgAsset = release.assets.first(where: { $0.name.hasSuffix(".dmg") }),
                   let dmgURL = URL(string: dmgAsset.browser_download_url) else { return }
 
-            print("New version \(latest) available, downloading...")
-            downloadAndInstall(dmgURL: dmgURL, version: latest)
+            print("New version \(latest) available")
+            DispatchQueue.main.async {
+                let alert = NSAlert()
+                alert.messageText = "Update available — v\(latest)"
+                alert.informativeText = "A new version of HelloWorld is available. Install now and relaunch?"
+                alert.addButton(withTitle: "Install & Relaunch")
+                alert.addButton(withTitle: "Not Now")
+                alert.alertStyle = .informational
+                if alert.runModal() == .alertFirstButtonReturn {
+                    downloadAndInstall(dmgURL: dmgURL, version: latest)
+                }
+            }
         }.resume()
     }
 
