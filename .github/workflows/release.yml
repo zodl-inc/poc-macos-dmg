@@ -72,14 +72,28 @@ jobs:
             > /tmp/update_signing_key.pem
 
           SHA256_FILE=$(ls build/HelloWorld-*.sha256)
-          openssl pkeyutl -sign \
-            -inkey /tmp/update_signing_key.pem \
-            -in "$SHA256_FILE" \
-            -out "${SHA256_FILE}.sig"
-          # Encode sig as base64 for easy embedding
-          base64 -i "${SHA256_FILE}.sig" -o "${SHA256_FILE}.sig.b64"
-          echo "✅ Signed: $(cat ${SHA256_FILE}.sig.b64)"
-          rm /tmp/update_signing_key.pem "${SHA256_FILE}.sig"
+          # Sign using Python cryptography (cross-platform, consistent Ed25519)
+          pip3 install cryptography --quiet
+          python3 - << PYEOF
+import base64
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+with open("/tmp/update_signing_key.pem", "rb") as f:
+    private_key = load_pem_private_key(f.read(), password=None)
+
+with open("${SHA256_FILE}", "rb") as f:
+    data = f.read()
+
+signature = private_key.sign(data)
+sig_b64 = base64.b64encode(signature).decode()
+
+with open("${SHA256_FILE}.sig.b64", "w") as f:
+    f.write(sig_b64)
+
+print(f"✅ Ed25519 signed: {sig_b64[:40]}...")
+PYEOF
+          rm /tmp/update_signing_key.pem
 
       - name: Notarize DMG
         run: |
