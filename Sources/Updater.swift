@@ -278,38 +278,27 @@ class Updater {
             let mountPoint = parseMountPoint(mountOutput) ?? "/Volumes/HelloWorld"
             log("📂 Mounted at \(mountPoint)")
 
-            // Try to replace in-place (same path the running app came from).
-            // If that fails (permissions), fall back to ~/Applications and move
-            // the old copy out of the way so LS doesn't open it instead.
+            // Always install to ~/Applications — no admin password needed.
+            // If the running app is somewhere else (e.g. /Applications),
+            // move the old copy to Trash so LS doesn't open it instead of the new one.
             let currentAppPath = Bundle.main.bundlePath
             let homeApps = "\(NSHomeDirectory())/Applications"
-            let homeDestApp = "\(homeApps)/HelloWorld.app"
+            let destApp = "\(homeApps)/HelloWorld.app"
 
-            let inPlaceResult = run("/bin/sh", ["-c",
-                "rm -rf '\(currentAppPath)' && cp -R '\(mountPoint)/HelloWorld.app' '\(currentAppPath)'"
+            run("/bin/mkdir", ["-p", homeApps])
+            run("/bin/sh", ["-c",
+                "rm -rf '\(destApp)' && cp -R '\(mountPoint)/HelloWorld.app' '\(destApp)'"
             ])
-
-            let destApp: String
-            if inPlaceResult == 0 {
-                destApp = currentAppPath
-                log("📋 Installed in-place: \(destApp)")
-            } else {
-                // Can't write in-place — install to ~/Applications
-                run("/bin/mkdir", ["-p", homeApps])
-                run("/bin/sh", ["-c",
-                    "rm -rf '\(homeDestApp)' && cp -R '\(mountPoint)/HelloWorld.app' '\(homeDestApp)'"
-                ])
-                destApp = homeDestApp
-                log("📋 Installed to: \(destApp)")
-
-                // Move old copy out of the way so LS doesn't open it instead
-                if currentAppPath != homeDestApp && FileManager.default.fileExists(atPath: currentAppPath) {
-                    let trash = "\(currentAppPath).old-\(Int(Date().timeIntervalSince1970))"
-                    run("/bin/mv", [currentAppPath, trash])
-                    log("🗑 Moved old copy to \(trash) (delete manually)")
-                }
-            }
             run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", destApp])
+            log("📋 Installed to: \(destApp)")
+
+            // If running from a different path, move it to Trash so LS picks up the new one
+            if currentAppPath != destApp && FileManager.default.fileExists(atPath: currentAppPath) {
+                let trashURL = URL(fileURLWithPath: currentAppPath)
+                var resultURL: NSURL?
+                try? FileManager.default.trashItem(at: trashURL, resultingItemURL: &resultURL)
+                log("🗑 Moved old copy (\(currentAppPath)) to Trash")
+            }
             log("✅ Installed")
 
             run("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"])
