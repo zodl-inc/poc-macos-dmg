@@ -1,135 +1,67 @@
-# macOS Hello World POC
+# poc-macos-dmg
 
-Minimal macOS app (Apple Silicon) con auto-update via GitHub Releases, sin colectar IPs.
+Minimal macOS app (Apple Silicon) with secure auto-update via GitHub Releases — no IP collection by the developer.
 
-## Estructura
+The app shows a Hello World window with a live debug console, checks for updates 3s after launch (and hourly while open), and self-updates with user confirmation.
+
+## Layout
 
 ```
-Sources/main.swift      — app principal (NSWindow + "Hola Mundo")
-Sources/Updater.swift   — auto-updater manual sin frameworks
-Resources/Info.plist    — bundle config + SUFeedURL para Sparkle
-scripts/build.sh        — compila .app y genera .dmg
-scripts/make-release.sh — sube a GitHub Releases + actualiza appcast.xml
+Sources/main.swift             — app: window + version label + log console
+Sources/Updater.swift          — auto-updater: 6 security layers, atomic swap, helper relaunch
+Resources/Info.plist           — bundle config (version patched by CI from the git tag)
+scripts/build-signed.sh        — compile, Developer ID sign, versioned DMG with /Applications symlink
+scripts/sign-checksum.py       — Ed25519-sign the SHA256 file (CI)
+scripts/get-spki-hashes.swift  — print GitHub's SPKI hashes as Swift/Security sees them
+.github/workflows/build.yml    — CI build on every push
+.github/workflows/release.yml  — tag push → sign → notarize → staple → checksum → Ed25519 → GitHub Release
+.github/workflows/get-spki-hashes.yml — manual: refresh pin hashes
 ```
 
-## Construir (en un Mac)
+## Release a new version
 
 ```bash
-chmod +x scripts/build.sh
-./scripts/build.sh
-# Genera: build/HelloWorld.app + build/HelloWorld-1.0.0.dmg
-open build/HelloWorld.app   # probar local
+# Bump version in Resources/Info.plist, commit, then:
+git tag v1.0.X && git push origin main v1.0.X
 ```
 
-## Respuestas a tus preguntas
+CI builds, signs (Developer ID `RLPRR8CPQG`), notarizes with Apple, staples, computes SHA-256, signs the checksum with Ed25519, and publishes everything to GitHub Releases. Installed apps detect the new release on next launch and prompt to update.
 
----
+## Secrets & infrastructure
 
-### ¿GitHub Releases colecta IPs?
+| What | Where |
+|------|-------|
+| Developer ID cert (.p12) + notarytool creds | AWS SM `/infra/apple/developer-id-macos` |
+| Ed25519 update-signing private key | AWS SM `/infra/apple/update-signing-key` |
+| CI access | IAM role `poc-macos-dmg-gha` via GitHub OIDC (repo-scoped, secrets-read-only) |
 
-**Técnicamente sí** (GitHub lo logea en su infraestructura), **pero tú como developer no ves nada** — GitHub no expone logs de descarga a los repo owners. Así que para efectos prácticos: **cero visibilidad de tu parte**.
+No static credentials in GitHub. The Ed25519 public key is hardcoded in `Updater.swift`.
 
-Si quieres **cero absoluto** (ni GitHub ve):
-- IPFS: sube el DMG a IPFS, enlaza el CID. Distribución P2P, sin servidor central.
-- Cloudflare R2 + `no_log: true` en las reglas: tú controlas los logs y los puedes apagar.
+## Privacy: does the developer see who downloads/updates?
 
-Para un POC/indie app: **GitHub Releases es suficiente** — no tienes acceso a IPs.
+**No.** GitHub logs requests on their infrastructure but exposes zero per-download data to repo owners — no IPs, no download logs, no update-check logs. The app only ever talks to `api.github.com` and `github.com` (release assets). There is no developer-operated server and no telemetry.
 
----
+For absolute zero-knowledge (where not even GitHub sees user IPs), alternatives are IPFS or a Tor onion service — out of scope for this POC.
 
-### ¿Auto-update sin colectar IPs?
+## Update security
 
-**Sí, completamente factible.** Dos opciones:
+Six layers — TLS + SPKI pinning with OCSP fallback, Ed25519-signed checksums, SHA-256, codesign TeamID verification, mounted-bundle version check, and Apple notarization. Full threat model, rationale, and pin-rotation runbook in [SECURITY.md](SECURITY.md).
 
-#### Opción A: Sparkle (recomendado para producción)
-Sparkle es el estándar de la industria (Homebrew Cask lo usa, VS Code macOS, etc.).
+## Install/relaunch mechanics
 
-1. Añadir Sparkle via Swift Package Manager:
-```swift
-// Package.swift
-dependencies: [
-    .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.0.0")
-]
-```
+- First install: DMG shows app + `/Applications` symlink, user drags (standard macOS pattern)
+- Updates install **in-place** (same directory the app runs from)
+- The running bundle is never deleted — new version lands as `.new-update`, then an atomic `mv` swap
+- A helper script in `/tmp` (launched with `nohup`; macOS has no `setsid`) waits for the app to exit, cleans up the old bundle, re-registers with LaunchServices, and relaunches
+- DMG volume name embeds the version (`HelloWorld-1.0.X`) so stale mounted volumes can never be mistaken for the new one
 
-2. En `Info.plist` ya está configurado:
-```xml
-<key>SUFeedURL</key>
-<string>https://raw.githubusercontent.com/YOUR_ORG/YOUR_REPO/main/appcast.xml</string>
-```
+## Hard-won macOS gotchas (for the next person)
 
-3. Sparkle descarga el `appcast.xml` desde GitHub raw (tú no ves quién lo descargó), verifica la firma EdDSA, descarga el DMG, y reemplaza la app automáticamente.
-
-**¿Sparkle hace phone-home al developer?** No. Solo hace GET a la URL que tú configures (GitHub raw). Ni telemetría, ni analytics, nada.
-
-#### Opción B: Self-updater manual (ver Updater.swift)
-El código en `Sources/Updater.swift` hace exactamente lo que describes:
-1. GET `api.github.com/repos/.../releases/latest` → compara versión
-2. Si hay nueva: descarga el DMG
-3. `hdiutil attach` → monta el DMG
-4. `cp -R` → reemplaza `/Applications/HelloWorld.app`
-5. `hdiutil detach` → desmonta
-6. `open /Applications/HelloWorld.app` + termina la app actual
-
-**¿Se puede auto-instalar sin pedir permiso al usuario?**
-
-Depende del sandbox:
-
-| | App Sandbox | Sin sandbox |
-|---|---|---|
-| Escribir en /Applications | ❌ bloqueado | ✅ funciona |
-| Sparkle auto-update | ✅ (usa XPC helper) | ✅ |
-| Self-updater manual | ❌ | ✅ |
-| Notarización requerida | Sí | Sí (para distribución) |
-
-**Para un POC sin App Store**: no uses sandbox → el auto-update funciona directo.
-
-**Para distribución seria**: usa Sparkle 2.x — tiene un XPC helper (`Sparkle2`) que corre fuera del sandbox para hacer la instalación.
-
----
-
-### Flujo completo de distribución
-
-```
-1. Desarrollas nueva versión → ./scripts/build.sh → DMG
-2. ./scripts/make-release.sh 1.0.1 →
-       - Sube DMG a GitHub Releases
-       - Genera appcast.xml con firma EdDSA
-       - Commit + push appcast.xml al repo
-3. Usuarios con la app instalada:
-       - App hace GET a raw.githubusercontent.com/appcast.xml
-       - Compara versión → hay nueva
-       - Descarga DMG desde github.com/releases/...
-       - Instala y reinicia automáticamente
-```
-
-**TÚ no ves nada** — ni quién chequeó updates, ni quién descargó. GitHub ve las IPs en sus logs pero no te las expone.
-
----
-
-### Para notarizar (distribución real, no POC)
-
-Necesitas Apple Developer account ($99/año):
-
-```bash
-# 1. Firmar con Developer ID
-codesign --deep --force \
-    --sign "Developer ID Application: Tu Nombre (XXXXXXXXXX)" \
-    --entitlements entitlements.plist \
-    build/HelloWorld.app
-
-# 2. Crear DMG y firmar el DMG también
-# (ver scripts/build.sh con la firma real)
-
-# 3. Notarizar
-xcrun notarytool submit build/HelloWorld-1.0.1.dmg \
-    --apple-id "tu@email.com" \
-    --team-id "XXXXXXXXXX" \
-    --password "@keychain:AC_PASSWORD" \
-    --wait
-
-# 4. Staple
-xcrun stapler staple build/HelloWorld-1.0.1.dmg
-```
-
-Sin notarizar, macOS Gatekeeper muestra warning pero el usuario puede abrirlo con click derecho → Abrir. Para POC está bien.
+1. `hdiutil attach -quiet -plist` — `-quiet` suppresses the plist. You get no mount point.
+2. `setsid` does not exist on macOS. Use `nohup ... &`.
+3. You cannot `rm -rf` a running app bundle. `mv` works (open file handles survive).
+4. `stapler staple` modifies the DMG — compute checksums **after** notarization.
+5. `SecKeyCopyExternalRepresentation` ≠ OpenSSL SPKI — compute pin hashes with the same API that verifies them (`scripts/get-spki-hashes.swift`).
+6. SecKey has no EdDSA — use CryptoKit `Curve25519.Signing` for Ed25519.
+7. New GitHub repos use `repo:org@ID/name@ID:*` OIDC sub claims — old-style `repo:org/name:*` trust policies fail.
+8. macos-15 runners: `pip3 install` needs `--break-system-packages`.
