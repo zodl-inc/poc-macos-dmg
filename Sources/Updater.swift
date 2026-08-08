@@ -362,11 +362,12 @@ class Updater {
                 try? helperScript.write(toFile: helperPath, atomically: true, encoding: .utf8)
                 run("/bin/chmod", ["+x", helperPath])
 
-                // Launch helper detached from this process (setsid = new session, no parent)
+                // Launch helper detached — nohup + & + disown pattern (setsid doesn't exist on macOS)
                 let p = Process()
                 p.launchPath = "/bin/sh"
-                p.arguments = ["-c", "setsid '\(helperPath)' &"]
+                p.arguments = ["-c", "nohup '\(helperPath)' >/dev/null 2>&1 &"]
                 p.launch()
+                p.waitUntilExit()
 
                 log("✅ Helper launched — app will close now")
                 NSApplication.shared.terminate(nil)

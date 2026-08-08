@@ -57,7 +57,7 @@ func log(_ msg: String) {
 
 window.makeKeyAndOrderFront(nil)
 app.activate(ignoringOtherApps: true)
-log("App started — v1.0.42")
+log("App started — v1.0.43")
 log("📍 Path: \(Bundle.main.bundlePath)")
 log("👤 Home: \(NSHomeDirectory())")
 
