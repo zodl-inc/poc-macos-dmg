@@ -278,21 +278,17 @@ class Updater {
             let mountPoint = parseMountPoint(mountOutput) ?? "/Volumes/HelloWorld"
             log("📂 Mounted at \(mountPoint)")
 
-            // Always install to ~/Applications — no admin password needed.
-            // If the running app is somewhere else (e.g. /Applications),
-            // move the old copy to Trash so LS doesn't open it instead of the new one.
+            // Install to the same directory the running app came from.
+            // This way /Applications stays in /Applications, ~/Applications stays there.
             let currentAppPath = Bundle.main.bundlePath
-            let homeApps = "\(NSHomeDirectory())/Applications"
-            let destApp = "\(homeApps)/HelloWorld.app"
+            let destApp = currentAppPath  // replace in-place
 
             log("📍 Current app path: \(currentAppPath)")
-            log("📁 Target: \(destApp)")
+            log("📁 Target (in-place): \(destApp)")
 
-            run("/bin/mkdir", ["-p", homeApps])
-
-            // Copy new version to a temp name first — avoids touching the running bundle
-            let destAppNew = "\(destApp).new-update"
-            let destAppOld = "\(destApp).old-update"
+            // Temp paths alongside the current install
+            let destAppNew = "\(currentAppPath).new-update"
+            let destAppOld = "\(currentAppPath).old-update"
             run("/bin/sh", ["-c", "rm -rf '\(destAppNew)'"])
 
             let cpResult = run("/bin/sh", ["-c",
@@ -319,15 +315,6 @@ class Updater {
             let exists = FileManager.default.fileExists(atPath: destApp)
             log("  \(destApp) exists after swap: \(exists)")
 
-            // If running from a different path (e.g. /Applications), trash it
-            if currentAppPath != destApp && FileManager.default.fileExists(atPath: currentAppPath) {
-                do {
-                    try FileManager.default.trashItem(at: URL(fileURLWithPath: currentAppPath), resultingItemURL: nil)
-                    log("🗑 Trashed old copy at: \(currentAppPath)")
-                } catch {
-                    log("⚠️ Couldn't trash \(currentAppPath): \(error.localizedDescription)")
-                }
-            }
             log("✅ Install complete")
 
             run("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"])

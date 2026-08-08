@@ -18,7 +18,8 @@ label.alignment = .center
 label.frame = NSRect(x: 0, y: 360, width: 500, height: 50)
 window.contentView?.addSubview(label)
 
-let version = NSTextField(labelWithString: "v1.0.36")
+let versionString = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+let version = NSTextField(labelWithString: "v\(versionString)")
 version.font = NSFont.systemFont(ofSize: 12)
 version.textColor = .secondaryLabelColor
 version.alignment = .center
@@ -57,7 +58,7 @@ func log(_ msg: String) {
 
 window.makeKeyAndOrderFront(nil)
 app.activate(ignoringOtherApps: true)
-log("App started — v1.0.44")
+log("App started — v1.0.45")
 log("📍 Path: \(Bundle.main.bundlePath)")
 log("👤 Home: \(NSHomeDirectory())")
 
