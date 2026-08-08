@@ -289,13 +289,23 @@ class Updater {
             run("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"])
             try? FileManager.default.removeItem(at: dmgDest)
 
+            // Force Launch Services to register the new app location before relaunching.
+            // Without this, macOS LS cache may open the old copy from a different path.
+            run("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
+                ["-f", destApp])
+            // Touch the bundle so Finder/Spotlight see it as updated
+            run("/usr/bin/touch", [destApp])
+
             log("🚀 Relaunching from \(destApp)...")
             DispatchQueue.main.async {
-                // Use a shell script that waits for this process to exit before opening,
-                // and forces a new instance (-n) so macOS doesn't reuse a running copy
-                // from a different path (e.g. /Applications vs ~/Applications).
                 let pid = ProcessInfo.processInfo.processIdentifier
-                let script = "while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done; open -n '\(destApp)'"
+                // Wait for this process to fully exit before opening the new one,
+                // then use -f to force the specific path (bypasses LS bundle-ID routing)
+                let script = """
+                    while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done
+                    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f '\(destApp)'
+                    open -na '\(destApp)'
+                    """
                 let p = Process()
                 p.launchPath = "/bin/sh"
                 p.arguments = ["-c", script]
