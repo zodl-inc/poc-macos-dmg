@@ -288,31 +288,45 @@ class Updater {
             log("📍 Current app path: \(currentAppPath)")
             log("📁 Target: \(destApp)")
 
-            let mkdirResult = run("/bin/mkdir", ["-p", homeApps])
-            log("  mkdir ~/Applications: exit \(mkdirResult)")
+            run("/bin/mkdir", ["-p", homeApps])
+
+            // Copy new version to a temp name first — avoids touching the running bundle
+            let destAppNew = "\(destApp).new-update"
+            let destAppOld = "\(destApp).old-update"
+            run("/bin/sh", ["-c", "rm -rf '\(destAppNew)'"])
 
             let cpResult = run("/bin/sh", ["-c",
-                "rm -rf '\(destApp)' && cp -R '\(mountPoint)/HelloWorld.app' '\(destApp)'"
+                "cp -R '\(mountPoint)/HelloWorld.app' '\(destAppNew)'"
             ])
-            log("  cp result: exit \(cpResult)")
+            log("  cp to temp: exit \(cpResult)")
+
+            guard cpResult == 0 && FileManager.default.fileExists(atPath: destAppNew) else {
+                log("❌ Copy failed — aborting")
+                run("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"])
+                return
+            }
+            run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", destAppNew])
+
+            // Atomic swap: rename current → .old, new → current
+            // mv works even if the bundle is in use (doesn't touch open file handles)
+            if FileManager.default.fileExists(atPath: destApp) {
+                let mvOldResult = run("/bin/mv", [destApp, destAppOld])
+                log("  mv current → .old: exit \(mvOldResult)")
+            }
+            let mvNewResult = run("/bin/mv", [destAppNew, destApp])
+            log("  mv .new → current: exit \(mvNewResult)")
 
             let exists = FileManager.default.fileExists(atPath: destApp)
-            log("  \(destApp) exists after copy: \(exists)")
+            log("  \(destApp) exists after swap: \(exists)")
 
-            run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", destApp])
-
-            // If running from a different path, move it to Trash so LS picks up the new one
+            // If running from a different path (e.g. /Applications), trash it
             if currentAppPath != destApp && FileManager.default.fileExists(atPath: currentAppPath) {
-                let trashURL = URL(fileURLWithPath: currentAppPath)
-                var resultURL: NSURL?
                 do {
-                    try FileManager.default.trashItem(at: trashURL, resultingItemURL: &resultURL)
-                    log("🗑 Trashed old copy: \(currentAppPath)")
+                    try FileManager.default.trashItem(at: URL(fileURLWithPath: currentAppPath), resultingItemURL: nil)
+                    log("🗑 Trashed old copy at: \(currentAppPath)")
                 } catch {
-                    log("⚠️ Couldn't trash old copy: \(error.localizedDescription)")
+                    log("⚠️ Couldn't trash \(currentAppPath): \(error.localizedDescription)")
                 }
-            } else {
-                log("  (no old copy to trash — same path or doesn't exist)")
             }
             log("✅ Install complete")
 
@@ -326,7 +340,8 @@ class Updater {
             // Touch the bundle so Finder/Spotlight see it as updated
             run("/usr/bin/touch", [destApp])
 
-            log("🚀 Relaunching from \(destApp)...")
+            log("🚀 Relaunching in 5 seconds from \(destApp) — read the logs above!")
+            Thread.sleep(forTimeInterval: 5)
             DispatchQueue.main.async {
                 let pid = ProcessInfo.processInfo.processIdentifier
                 // Wait for this process to fully exit before opening the new one,
