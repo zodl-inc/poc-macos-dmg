@@ -289,11 +289,16 @@ class Updater {
             run("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"])
             try? FileManager.default.removeItem(at: dmgDest)
 
-            log("🚀 Relaunching...")
+            log("🚀 Relaunching from \(destApp)...")
             DispatchQueue.main.async {
+                // Use a shell script that waits for this process to exit before opening,
+                // and forces a new instance (-n) so macOS doesn't reuse a running copy
+                // from a different path (e.g. /Applications vs ~/Applications).
+                let pid = ProcessInfo.processInfo.processIdentifier
+                let script = "while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done; open -n '\(destApp)'"
                 let p = Process()
-                p.launchPath = "/usr/bin/open"
-                p.arguments = [destApp]
+                p.launchPath = "/bin/sh"
+                p.arguments = ["-c", script]
                 p.launch()
                 NSApplication.shared.terminate(nil)
             }
