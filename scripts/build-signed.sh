@@ -44,9 +44,6 @@ hdiutil create \
 echo "==> Signing DMG..."
 codesign --force --sign "$IDENTITY" "$BUILD_DIR/$APP_NAME-$VERSION.dmg"
 
-echo "==> Generating SHA256 checksum..."
-shasum -a 256 "$BUILD_DIR/$APP_NAME-$VERSION.dmg" | awk '{print $1}' > "$BUILD_DIR/$APP_NAME-$VERSION.sha256"
-echo "  $(cat "$BUILD_DIR/$APP_NAME-$VERSION.sha256")  $APP_NAME-$VERSION.dmg"
-
 echo ""
-echo "✅ Done: build/$APP_NAME-$VERSION.dmg (signed) + .sha256"
+echo "✅ Done: build/$APP_NAME-$VERSION.dmg (signed)"
+echo "   SHA256 + Ed25519 sig computed after notarization (staple modifies the DMG)"

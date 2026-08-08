@@ -61,22 +61,6 @@ jobs:
       - name: Build app + sign + DMG
         run: chmod +x scripts/build-signed.sh && ./scripts/build-signed.sh
 
-      - name: Sign SHA256 checksum with Ed25519
-        run: |
-          # Fetch Ed25519 private key from SM
-          SIGNING_SECRET=$(aws secretsmanager get-secret-value \
-            --secret-id /infra/apple/update-signing-key \
-            --query SecretString --output text)
-          echo "$SIGNING_SECRET" | python3 -c \
-            "import json,sys,base64; print(base64.b64decode(json.load(sys.stdin)['private_key_pem_b64']).decode())" \
-            > /tmp/update_signing_key.pem
-
-          SHA256_FILE=$(ls build/HelloWorld-*.sha256)
-          pip3 install cryptography --quiet --break-system-packages 2>/dev/null || \
-            pip3 install cryptography --quiet
-          python3 scripts/sign-checksum.py /tmp/update_signing_key.pem "$SHA256_FILE"
-          rm /tmp/update_signing_key.pem
-
       - name: Notarize DMG
         run: |
           DMG=$(ls build/HelloWorld-*.dmg)
@@ -89,6 +73,26 @@ jobs:
           echo "Stapling notarization ticket..."
           xcrun stapler staple "$DMG"
           echo "✅ Notarized and stapled: $DMG"
+
+      - name: Compute SHA256 + sign with Ed25519 (after notarization — staple changes the DMG)
+        run: |
+          DMG=$(ls build/HelloWorld-*.dmg)
+          SHA256_FILE="${DMG%.dmg}.sha256"
+          # Recompute hash of the final stapled DMG
+          shasum -a 256 "$DMG" | awk '{print $1}' > "$SHA256_FILE"
+          echo "SHA256: $(cat $SHA256_FILE)"
+
+          # Fetch Ed25519 private key from SM and sign
+          SIGNING_SECRET=$(aws secretsmanager get-secret-value \
+            --secret-id /infra/apple/update-signing-key \
+            --query SecretString --output text)
+          echo "$SIGNING_SECRET" | python3 -c \
+            "import json,sys,base64; print(base64.b64decode(json.load(sys.stdin)['private_key_pem_b64']).decode())" \
+            > /tmp/update_signing_key.pem
+          pip3 install cryptography --quiet --break-system-packages 2>/dev/null || \
+            pip3 install cryptography --quiet
+          python3 scripts/sign-checksum.py /tmp/update_signing_key.pem "$SHA256_FILE"
+          rm /tmp/update_signing_key.pem
 
       - name: Create GitHub Release and upload DMG
         uses: softprops/action-gh-release@v2
