@@ -285,21 +285,36 @@ class Updater {
             let homeApps = "\(NSHomeDirectory())/Applications"
             let destApp = "\(homeApps)/HelloWorld.app"
 
-            run("/bin/mkdir", ["-p", homeApps])
-            run("/bin/sh", ["-c",
+            log("📍 Current app path: \(currentAppPath)")
+            log("📁 Target: \(destApp)")
+
+            let mkdirResult = run("/bin/mkdir", ["-p", homeApps])
+            log("  mkdir ~/Applications: exit \(mkdirResult)")
+
+            let cpResult = run("/bin/sh", ["-c",
                 "rm -rf '\(destApp)' && cp -R '\(mountPoint)/HelloWorld.app' '\(destApp)'"
             ])
+            log("  cp result: exit \(cpResult)")
+
+            let exists = FileManager.default.fileExists(atPath: destApp)
+            log("  \(destApp) exists after copy: \(exists)")
+
             run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", destApp])
-            log("📋 Installed to: \(destApp)")
 
             // If running from a different path, move it to Trash so LS picks up the new one
             if currentAppPath != destApp && FileManager.default.fileExists(atPath: currentAppPath) {
                 let trashURL = URL(fileURLWithPath: currentAppPath)
                 var resultURL: NSURL?
-                try? FileManager.default.trashItem(at: trashURL, resultingItemURL: &resultURL)
-                log("🗑 Moved old copy (\(currentAppPath)) to Trash")
+                do {
+                    try FileManager.default.trashItem(at: trashURL, resultingItemURL: &resultURL)
+                    log("🗑 Trashed old copy: \(currentAppPath)")
+                } catch {
+                    log("⚠️ Couldn't trash old copy: \(error.localizedDescription)")
+                }
+            } else {
+                log("  (no old copy to trash — same path or doesn't exist)")
             }
-            log("✅ Installed")
+            log("✅ Install complete")
 
             run("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"])
             try? FileManager.default.removeItem(at: dmgDest)
