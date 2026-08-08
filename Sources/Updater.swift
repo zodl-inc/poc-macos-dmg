@@ -353,7 +353,7 @@ class Updater {
                     # External updater helper — runs after the app process exits
                     # Swap .new-update into place, register with LS, open new version
                     while kill -0 \(pid) 2>/dev/null; do sleep 0.1; done
-                    mv -f '\(destAppOld)' '\(destApp).really-old' 2>/dev/null
+                    rm -rf '\(destAppOld)' 2>/dev/null
                     '\(lsregister)' -f '\(destApp)' 2>/dev/null
                     sleep 0.3
                     open -na '\(destApp)'
