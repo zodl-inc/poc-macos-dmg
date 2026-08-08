@@ -273,10 +273,28 @@ class Updater {
             run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", dmgDest.path])
 
             log("📂 Mounting DMG...")
+            // NOTE: -quiet suppresses -plist output, so don't combine them
             let mountOutput = runOutput("/usr/bin/hdiutil",
-                ["attach", dmgDest.path, "-nobrowse", "-quiet", "-plist"])
-            let mountPoint = parseMountPoint(mountOutput) ?? "/Volumes/HelloWorld"
+                ["attach", dmgDest.path, "-nobrowse", "-plist"])
+            guard let mountPoint = parseMountPoint(mountOutput) else {
+                log("❌ Couldn't parse mount point from hdiutil — aborting")
+                try? FileManager.default.removeItem(at: dmgDest)
+                return
+            }
             log("📂 Mounted at \(mountPoint)")
+
+            // Sanity check: verify the mounted app is actually the new version
+            let mountedPlist = "\(mountPoint)/HelloWorld.app/Contents/Info.plist"
+            let mountedVersion = runOutput("/usr/bin/defaults",
+                ["read", mountedPlist, "CFBundleShortVersionString"])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            log("🔎 Mounted bundle version: \(mountedVersion) (expected \(version))")
+            guard mountedVersion == version else {
+                log("❌ Mounted DMG has wrong version — aborting (stale volume?)")
+                run("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"])
+                try? FileManager.default.removeItem(at: dmgDest)
+                return
+            }
 
             // Install to the same directory the running app came from.
             // This way /Applications stays in /Applications, ~/Applications stays there.
