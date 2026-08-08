@@ -278,21 +278,37 @@ class Updater {
             let mountPoint = parseMountPoint(mountOutput) ?? "/Volumes/HelloWorld"
             log("📂 Mounted at \(mountPoint)")
 
-            // Install to the same directory the running app lives in.
-            // If that's not writable (e.g. /Applications and user has no admin),
-            // fall back to ~/Applications.
-            let currentDir = Bundle.main.bundleURL.deletingLastPathComponent().path
+            // Try to replace in-place (same path the running app came from).
+            // If that fails (permissions), fall back to ~/Applications and move
+            // the old copy out of the way so LS doesn't open it instead.
+            let currentAppPath = Bundle.main.bundlePath
+            let homeApps = "\(NSHomeDirectory())/Applications"
+            let homeDestApp = "\(homeApps)/HelloWorld.app"
+
+            let inPlaceResult = run("/bin/sh", ["-c",
+                "rm -rf '\(currentAppPath)' && cp -R '\(mountPoint)/HelloWorld.app' '\(currentAppPath)'"
+            ])
+
             let destApp: String
-            if FileManager.default.isWritableFile(atPath: currentDir) {
-                destApp = Bundle.main.bundlePath
-                log("📋 Installing in-place: \(destApp)")
+            if inPlaceResult == 0 {
+                destApp = currentAppPath
+                log("📋 Installed in-place: \(destApp)")
             } else {
-                let homeApps = "\(NSHomeDirectory())/Applications"
+                // Can't write in-place — install to ~/Applications
                 run("/bin/mkdir", ["-p", homeApps])
-                destApp = "\(homeApps)/HelloWorld.app"
-                log("📋 Not writable, installing to: \(destApp)")
+                run("/bin/sh", ["-c",
+                    "rm -rf '\(homeDestApp)' && cp -R '\(mountPoint)/HelloWorld.app' '\(homeDestApp)'"
+                ])
+                destApp = homeDestApp
+                log("📋 Installed to: \(destApp)")
+
+                // Move old copy out of the way so LS doesn't open it instead
+                if currentAppPath != homeDestApp && FileManager.default.fileExists(atPath: currentAppPath) {
+                    let trash = "\(currentAppPath).old-\(Int(Date().timeIntervalSince1970))"
+                    run("/bin/mv", [currentAppPath, trash])
+                    log("🗑 Moved old copy to \(trash) (delete manually)")
+                }
             }
-            run("/bin/sh", ["-c", "rm -rf '\(destApp)' && cp -R '\(mountPoint)/HelloWorld.app' '\(destApp)'"])
             run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", destApp])
             log("✅ Installed")
 
