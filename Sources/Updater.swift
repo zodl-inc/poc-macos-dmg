@@ -278,10 +278,20 @@ class Updater {
             let mountPoint = parseMountPoint(mountOutput) ?? "/Volumes/HelloWorld"
             log("📂 Mounted at \(mountPoint)")
 
-            let homeApps = "\(NSHomeDirectory())/Applications"
-            let destApp = "\(homeApps)/HelloWorld.app"
-            log("📋 Installing to \(destApp)...")
-            run("/bin/mkdir", ["-p", homeApps])
+            // Install to the same directory the running app lives in.
+            // If that's not writable (e.g. /Applications and user has no admin),
+            // fall back to ~/Applications.
+            let currentDir = Bundle.main.bundleURL.deletingLastPathComponent().path
+            let destApp: String
+            if FileManager.default.isWritableFile(atPath: currentDir) {
+                destApp = Bundle.main.bundlePath
+                log("📋 Installing in-place: \(destApp)")
+            } else {
+                let homeApps = "\(NSHomeDirectory())/Applications"
+                run("/bin/mkdir", ["-p", homeApps])
+                destApp = "\(homeApps)/HelloWorld.app"
+                log("📋 Not writable, installing to: \(destApp)")
+            }
             run("/bin/sh", ["-c", "rm -rf '\(destApp)' && cp -R '\(mountPoint)/HelloWorld.app' '\(destApp)'"])
             run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", destApp])
             log("✅ Installed")
