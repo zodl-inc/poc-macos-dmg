@@ -340,21 +340,35 @@ class Updater {
             // Touch the bundle so Finder/Spotlight see it as updated
             run("/usr/bin/touch", [destApp])
 
-            log("🚀 Relaunching in 5 seconds from \(destApp) — read the logs above!")
-            Thread.sleep(forTimeInterval: 5)
+            log("🚀 Launching external helper to swap + relaunch...")
+
             DispatchQueue.main.async {
                 let pid = ProcessInfo.processInfo.processIdentifier
-                // Wait for this process to fully exit before opening the new one,
-                // then use -f to force the specific path (bypasses LS bundle-ID routing)
-                let script = """
-                    while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done
-                    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f '\(destApp)'
+                let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+
+                // Write helper script to /tmp — runs completely outside the app bundle
+                let helperPath = "/tmp/helloworld-updater-\(pid).sh"
+                let helperScript = """
+                    #!/bin/sh
+                    # External updater helper — runs after the app process exits
+                    # Swap .new-update into place, register with LS, open new version
+                    while kill -0 \(pid) 2>/dev/null; do sleep 0.1; done
+                    mv -f '\(destAppOld)' '\(destApp).really-old' 2>/dev/null
+                    '\(lsregister)' -f '\(destApp)' 2>/dev/null
+                    sleep 0.3
                     open -na '\(destApp)'
+                    rm -f '\(helperPath)'
                     """
+                try? helperScript.write(toFile: helperPath, atomically: true, encoding: .utf8)
+                run("/bin/chmod", ["+x", helperPath])
+
+                // Launch helper detached from this process (setsid = new session, no parent)
                 let p = Process()
                 p.launchPath = "/bin/sh"
-                p.arguments = ["-c", script]
+                p.arguments = ["-c", "setsid '\(helperPath)' &"]
                 p.launch()
+
+                log("✅ Helper launched — app will close now")
                 NSApplication.shared.terminate(nil)
             }
         }.resume()
