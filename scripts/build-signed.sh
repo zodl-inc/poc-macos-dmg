@@ -36,7 +36,7 @@ ln -s /Applications "$DMG_STAGING/Applications"
 # Note: auto-update installs to ~/Applications (no admin needed)
 
 hdiutil create \
-    -volname "$APP_NAME" \
+    -volname "$APP_NAME-$VERSION" \
     -srcfolder "$DMG_STAGING" \
     -ov -format UDZO \
     -o "$BUILD_DIR/$APP_NAME-$VERSION.dmg"
