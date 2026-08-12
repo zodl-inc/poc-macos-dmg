@@ -1,22 +1,24 @@
 #!/bin/bash
-# Build HelloWorld.app, sign with Developer ID, create signed DMG.
+# Build Zodl.app, sign with Developer ID, create signed DMG.
 # Requires: Xcode CLI tools + Developer ID Application cert in keychain.
 set -e
 
-APP_NAME="HelloWorld"
+APP_NAME="Zodl"
 VERSION=$(defaults read "$(pwd)/Resources/Info.plist" CFBundleShortVersionString 2>/dev/null || echo "1.0.0")
 BUILD_DIR="build"
 IDENTITY="Developer ID Application: The Zerocoin Electric Coin Company LLC (RLPRR8CPQG)"
 
-echo "==> Building HelloWorld v$VERSION..."
+echo "==> Building $APP_NAME v$VERSION..."
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR/$APP_NAME.app/Contents/MacOS"
 mkdir -p "$BUILD_DIR/$APP_NAME.app/Contents/Resources"
 
 swiftc Sources/main.swift Sources/Updater.swift \
     -o "$BUILD_DIR/$APP_NAME.app/Contents/MacOS/$APP_NAME" \
-    -target arm64-apple-macosx13.0 \
-    -sdk "$(xcrun --sdk macosx --show-sdk-path)"
+    -target arm64-apple-macosx14.0 \
+    -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
+    -framework SwiftUI \
+    -framework AppKit
 
 cp Resources/Info.plist "$BUILD_DIR/$APP_NAME.app/Contents/Info.plist"
 
@@ -33,7 +35,6 @@ rm -rf "$DMG_STAGING"
 mkdir -p "$DMG_STAGING"
 cp -R "$BUILD_DIR/$APP_NAME.app" "$DMG_STAGING/"
 ln -s /Applications "$DMG_STAGING/Applications"
-# Note: auto-update installs to ~/Applications (no admin needed)
 
 hdiutil create \
     -volname "$APP_NAME-$VERSION" \

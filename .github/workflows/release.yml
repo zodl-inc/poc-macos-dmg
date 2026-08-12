@@ -49,7 +49,6 @@ jobs:
           security set-keychain-settings -lut 3600 /tmp/ci.keychain
           rm /tmp/cert.p12
 
-          # Store notarization creds in keychain for notarytool
           xcrun notarytool store-credentials "notarytool-ci" \
             --apple-id "$APPLE_ID" \
             --team-id "$TEAM_ID" \
@@ -63,7 +62,7 @@ jobs:
 
       - name: Notarize DMG
         run: |
-          DMG=$(ls build/HelloWorld-*.dmg)
+          DMG=$(ls build/Zodl-*.dmg)
           echo "Submitting $DMG for notarization..."
           xcrun notarytool submit "$DMG" \
             --keychain-profile "notarytool-ci" \
@@ -74,15 +73,13 @@ jobs:
           xcrun stapler staple "$DMG"
           echo "✅ Notarized and stapled: $DMG"
 
-      - name: Compute SHA256 + sign with Ed25519 (after notarization — staple changes the DMG)
+      - name: Compute SHA256 + sign with Ed25519 (after notarization)
         run: |
-          DMG=$(ls build/HelloWorld-*.dmg)
+          DMG=$(ls build/Zodl-*.dmg)
           SHA256_FILE="${DMG%.dmg}.sha256"
-          # Recompute hash of the final stapled DMG
           shasum -a 256 "$DMG" | awk '{print $1}' > "$SHA256_FILE"
           echo "SHA256: $(cat $SHA256_FILE)"
 
-          # Fetch Ed25519 private key from SM and sign
           SIGNING_SECRET=$(aws secretsmanager get-secret-value \
             --secret-id /infra/apple/update-signing-key \
             --query SecretString --output text)
@@ -94,22 +91,23 @@ jobs:
           python3 scripts/sign-checksum.py /tmp/update_signing_key.pem "$SHA256_FILE"
           rm /tmp/update_signing_key.pem
 
-      - name: Create GitHub Release and upload DMG
+      - name: Create GitHub Release and upload assets
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            build/HelloWorld-*.dmg
-            build/HelloWorld-*.sha256
-            build/HelloWorld-*.sha256.sig.b64
+            build/Zodl-*.dmg
+            build/Zodl-*.sha256
+            build/Zodl-*.sha256.sig.b64
           generate_release_notes: false
           body: |
-            ## HelloWorld ${{ env.VERSION }}
+            ## Zodl macOS PoC ${{ env.VERSION }}
 
-            Signed + **notarized** with Developer ID Application (ECC / RLPRR8CPQG).
+            Signed + notarized with Developer ID Application (ZODL / RLPRR8CPQG).
             Opens without any Gatekeeper warning.
 
             ### Install
-            Download the `.dmg`, open it, drag **HelloWorld.app** to Applications.
+            Download the `.dmg`, open it, drag **Zodl.app** to Applications.
 
             ### Auto-update
-            The app checks for updates on every launch and prompts before installing.
+            The app checks for updates 3s after launch and on every foreground.
+            Prompts before installing. Verifies SHA256 + Ed25519 signature.

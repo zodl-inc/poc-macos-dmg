@@ -1,72 +1,130 @@
-import Cocoa
+import SwiftUI
+import AppKit
 
-let app = NSApplication.shared
-app.setActivationPolicy(.regular)
+// MARK: - App entry point (mirrors zodlmac_internalApp.swift pattern)
 
-let window = NSWindow(
-    contentRect: NSRect(x: 0, y: 0, width: 500, height: 420),
-    styleMask: [.titled, .closable, .miniaturizable, .resizable],
-    backing: .buffered,
-    defer: false
-)
-window.title = "Hello World"
-window.center()
+@main
+struct ZodlPocApp: App {
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var didFinishLaunching = false
+    @State private var didEnterBackgroundOnce = false
+    @StateObject private var logStore = LogStore()
 
-let label = NSTextField(labelWithString: "Hello World 👋")
-label.font = NSFont.systemFont(ofSize: 36, weight: .bold)
-label.alignment = .center
-label.frame = NSRect(x: 0, y: 360, width: 500, height: 50)
-window.contentView?.addSubview(label)
-
-let versionString = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
-let version = NSTextField(labelWithString: "v\(versionString)")
-version.font = NSFont.systemFont(ofSize: 12)
-version.textColor = .secondaryLabelColor
-version.alignment = .center
-version.frame = NSRect(x: 0, y: 338, width: 500, height: 20)
-window.contentView?.addSubview(version)
-
-// Log console
-let scrollView = NSScrollView(frame: NSRect(x: 10, y: 10, width: 480, height: 320))
-scrollView.hasVerticalScroller = true
-scrollView.borderType = .bezelBorder
-let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 460, height: 320))
-textView.isEditable = false
-textView.isSelectable = true
-textView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-textView.backgroundColor = NSColor(white: 0.08, alpha: 1)
-textView.textColor = .green
-textView.textContainerInset = NSSize(width: 6, height: 6)
-scrollView.documentView = textView
-window.contentView?.addSubview(scrollView)
-
-func log(_ msg: String) {
-    let ts = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
-    let line = "[\(ts)] \(msg)\n"
-    print(line, terminator: "")
-    DispatchQueue.main.async {
-        textView.textStorage?.append(NSAttributedString(
-            string: line,
-            attributes: [
-                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
-                .foregroundColor: NSColor.green
-            ]
-        ))
-        textView.scrollToEndOfDocument(nil)
+    var body: some Scene {
+        Window("", id: "main") {
+            ContentView(logStore: logStore)
+                .frame(width: 500, height: 420)
+                .background(FixedWindowConfigurator())
+                .onAppear {
+                    guard !didFinishLaunching else { return }
+                    didFinishLaunching = true
+                    logStore.log("App started — v\(Updater.currentVersion)")
+                    logStore.log("📍 Path: \(Bundle.main.bundlePath)")
+                    logStore.log("👤 Home: \(NSHomeDirectory())")
+                    // Check for updates 3s after launch (same delay as before)
+                    DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
+                        Updater.checkAndUpdate(log: logStore.log)
+                    }
+                }
+                .onChange(of: scenePhase) { _, newPhase in
+                    switch newPhase {
+                    case .active:
+                        if didEnterBackgroundOnce {
+                            // Poll on foreground (mirrors iOS willEnterForeground)
+                            DispatchQueue.global().async {
+                                Updater.checkAndUpdate(log: logStore.log)
+                            }
+                        }
+                    case .background:
+                        didEnterBackgroundOnce = true
+                    default:
+                        break
+                    }
+                }
+        }
+        .windowResizability(.contentSize)
+        .defaultSize(width: 500, height: 420)
+        .defaultPosition(.center)
+        .commands {
+            CommandGroup(replacing: .newItem) { }
+        }
     }
 }
 
-window.makeKeyAndOrderFront(nil)
-app.activate(ignoringOtherApps: true)
-log("App started — v\(versionString)")
-log("📍 Path: \(Bundle.main.bundlePath)")
-log("👤 Home: \(NSHomeDirectory())")
+// MARK: - Log store (shared observable state for the console view)
 
-DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
-    Updater.checkAndUpdate(log: log)
-}
-Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { _ in
-    DispatchQueue.global().async { Updater.checkAndUpdate(log: log) }
+final class LogStore: ObservableObject {
+    @Published var lines: [String] = []
+
+    func log(_ msg: String) {
+        let ts = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
+        let line = "[\(ts)] \(msg)"
+        print(line)
+        DispatchQueue.main.async { self.lines.append(line) }
+    }
 }
 
-app.run()
+// MARK: - Main window UI
+
+struct ContentView: View {
+    @ObservedObject var logStore: LogStore
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Text("Zodl macOS PoC")
+                .font(.system(size: 28, weight: .bold))
+                .padding(.top, 16)
+
+            Text("v\(Updater.currentVersion)")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(logStore.lines.enumerated()), id: \.offset) { idx, line in
+                            Text(line)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.green)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .id(idx)
+                        }
+                    }
+                    .padding(6)
+                }
+                .background(Color(white: 0.08))
+                .cornerRadius(4)
+                .padding([.horizontal, .bottom], 10)
+                .onChange(of: logStore.lines.count) { _, _ in
+                    if let last = logStore.lines.indices.last {
+                        proxy.scrollTo(last, anchor: .bottom)
+                    }
+                }
+            }
+        }
+        .frame(width: 500, height: 420)
+    }
+}
+
+// MARK: - Window configurator (mirrors FixedWindowConfigurator in zodlmac)
+
+private struct FixedWindowConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { ConfigView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    final class ConfigView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window else { return }
+            window.styleMask.remove(.resizable)
+            window.collectionBehavior.remove(.fullScreenPrimary)
+            window.collectionBehavior.insert(.fullScreenNone)
+            let fixed = NSSize(width: 500, height: 420)
+            window.contentMinSize = fixed
+            window.contentMaxSize = fixed
+            window.isRestorable = false
+            window.title = ""
+            NSApp.changeWindowsItem(window, title: "Zodl", filename: false)
+        }
+    }
+}
