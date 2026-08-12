@@ -18,7 +18,8 @@ swiftc Sources/main.swift Sources/Updater.swift \
     -target arm64-apple-macosx14.0 \
     -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
     -framework SwiftUI \
-    -framework AppKit
+    -framework AppKit \
+    -parse-as-library
 
 cp Resources/Info.plist "$BUILD_DIR/$APP_NAME.app/Contents/Info.plist"
 

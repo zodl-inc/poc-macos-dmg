@@ -18,7 +18,8 @@ swiftc Sources/main.swift Sources/Updater.swift \
     -target arm64-apple-macosx14.0 \
     -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
     -framework SwiftUI \
-    -framework AppKit
+    -framework AppKit \
+    -parse-as-library
 
 echo "==> Writing Info.plist (version=$VERSION)..."
 sed "s/1\.0\.0/$VERSION/g; s|<string>1</string>|<string>$(echo $VERSION | tr -d .)</string>|g" \
