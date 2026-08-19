@@ -1,0 +1,960 @@
+# frozen_string_literal: true
+
+require "open3"
+require "fileutils"
+require "shellwords"
+
+# require_relative (not fastlane's intercepted `require`) avoids the spurious
+# "you have required a gem" notices for our local files. $LOAD_PATH lets these
+# files require each other by name; requiring preflight pulls in the other three.
+$LOAD_PATH.unshift(File.expand_path("lib", __dir__))
+require_relative "lib/zodl/preflight"
+require_relative "lib/zodl/build_paths"
+require_relative "lib/zodl/local_packages"
+require_relative "lib/zodl/notify"
+require_relative "lib/zodl/signing"
+require_relative "lib/zodl/dmg"
+require_relative "lib/zodl/pbxproj"
+require_relative "lib/zodl/whats_new"
+require_relative "lib/zodl/submit_preflight"
+
+# Refuse to run outside bundler so the pinned gem versions in Gemfile.lock are
+# always used. The Scripts/*.sh wrappers invoke `bundle exec fastlane`.
+unless ENV["BUNDLE_GEMFILE"]
+  UI.user_error!("Run through bundler: use ./Scripts/release.sh or ./Scripts/bump.sh (they call `bundle exec fastlane`).")
+end
+
+PROJECT = Zodl::BuildPaths::PROJECT
+TEST_SCHEME = "zodl-internal"        # only scheme wired to the zodlTests target
+TEST_DEVICE = "iPhone 17 Pro"
+PARTNER_KEYS_REL = "secant/Resources/PartnerKeys.plist"
+WHATS_NEW_REL = "secant/Resources/WhatsNew"
+FASTLANE_DIR = __dir__
+TEAM_ID = "RLPRR8CPQG"               # Apple Developer team (matches DEVELOPMENT_TEAM in the project)
+
+# Swift macros (TCA, swift-dependencies, swift-perception, swift-case-paths) and
+# SPM build-tool plugins (SwiftGen, SwiftLint, XCStringsTool) must be trusted
+# before use. A fresh build worktree carries no prior approval and this
+# non-interactive CLI build (fastlane → xcodebuild) can't show the trust prompt,
+# so without these flags xcodebuild fails at ComputeTargetDependencyGraph with
+# "Macro … must be enabled before it can be used". Both the test run and the
+# archive go through the same xcodebuild CLI, so both need them — keep the flags
+# here so the two invocations can't drift apart.
+SKIP_VALIDATION_XCARGS = "-skipPackagePluginValidation -skipMacroValidation"
+
+# Render xcodebuild output with xcbeautify rather than xcpretty. Most of this app's
+# tests are Swift Testing (@Test / #expect); xcpretty predates that format and
+# silently swallows its output, so a failing Swift Testing test would scroll past
+# with nothing printed. fastlane only auto-selects xcbeautify when it's installed
+# (otherwise it falls back to xcpretty), so pin it here and treat it as a build
+# prerequisite: `brew install xcbeautify`.
+XCODEBUILD_FORMATTER = "xcbeautify"
+
+# Don't auto-generate fastlane/README.md on every run; it is maintained by hand.
+skip_docs
+
+desc "Build, sign, and upload one or more variants; optionally submit to App Review. Driven by Scripts/release.sh."
+lane :release do |options|
+  repo_root = run("git rev-parse --show-toplevel", must_succeed: true).strip
+  ref           = options[:ref].to_s
+  version       = options.fetch(:version)
+  build         = Integer(options.fetch(:build))
+  dry_run       = truthy(options[:dry_run])
+  submit_review = truthy(options[:submit_review])
+  building      = !ref.empty?
+
+  variants = Zodl::Variants.expand(options.fetch(:variant))
+  # Context for the `error` hook below, which only receives the raised exception.
+  @notify_context = { variants: variants, version: version, build: build }
+  if submit_review && variants != ["appstore"]
+    UI.user_error!("--submit-review is only supported for --variant appstore")
+  end
+  UI.user_error!("--ref is required unless --submit-review is used") if !building && !submit_review
+  api_key = asc_api_key
+
+  sha = nil
+  if building
+    UI.message("Fetching latest refs from origin…")
+    # Fail closed: the preflight reconciles against origin, so a failed fetch must abort
+    # rather than silently leave the checks running on stale local refs.
+    run("git -C #{repo_root.shellescape} fetch --quiet --tags origin", must_succeed: true)
+    sha = resolve_sha(repo_root, ref)
+    branch_version = Zodl::Version.from_branch(ref)
+    project_version = marketing_version_at(repo_root, sha)
+    local_packages = local_packages_at(repo_root, sha)
+    # Resolve+verify the signing key path now (cwd is still the real repo), so it's
+    # an absolute path into the real fastlane dir before we chdir into the worktree.
+    auth_xcargs = asc_auth_xcargs(repo_root)
+
+    variants.each do |variant|
+      cfg = Zodl::Variants.config(variant)
+      UI.message("Reconciling #{variant} against git, the project, and App Store Connect…")
+      ctx = Zodl::Preflight::Context.new(
+        variant: variant,
+        requested_version: version,
+        requested_build: build,
+        project_version: project_version,
+        branch_version: branch_version,
+        latest_build: latest_build_number(api_key, cfg[:app_identifier], version),
+        ref_on_origin: ref_on_origin?(repo_root, sha),
+        dirty_tree: dirty_tree?(repo_root),
+        partner_keys_error: partner_keys_error(repo_root),
+        xcode_ok: xcode_ok?(repo_root),
+        signing_identity_ok: signing_identity_ok?,
+        local_packages: local_packages
+      )
+      report = Zodl::Preflight.check(ctx)
+      print_summary(variant, cfg, ref, sha, ctx, report)
+      unless report.ok?
+        # The duplicate-build refusal is the one failure where submit-only mode
+        # is the likely intent — the binary is already on App Store Connect —
+        # so point at it here: the submit preflight that carries this hint
+        # runs after this loop and is never reached on a failed build preflight.
+        if submit_review && report.errors.any? { |e| e.include?("already exists") }
+          UI.important("With --submit-review you can drop --ref to submit the build already on App Store Connect instead of rebuilding.")
+        end
+        UI.user_error!("Preflight failed for #{variant} — aborting.")
+      end
+    end
+  end
+
+  submission = nil
+  if submit_review
+    UI.message("Reconciling the App Review submission against App Store Connect…")
+    submission = submit_facts(api_key, repo_root, version, build, ref_given: building)
+    print_submit_summary(submission)
+    UI.user_error!("Submit preflight failed — aborting.") unless submission[:report].ok?
+  end
+
+  if dry_run
+    Zodl::Notify.post(event: :dry_run_ok, variants: variants, version: version, build: build)
+    checks = submit_review ? " (including App Review submission checks)" : ""
+    UI.success("Dry run complete — preflight passed for: #{variants.join(', ')}#{checks}. No build performed.")
+    next
+  end
+
+  prompt = if building
+             "Proceed with the build above?#{submit_review ? ' It will be submitted to App Review after upload.' : ''}"
+           else
+             "Submit the summary above to App Review?"
+           end
+  UI.user_error!("Aborted.") unless truthy(options[:yes]) || UI.confirm(prompt)
+
+  if building
+    # Create/refresh the App Store distribution profiles up front, so a signing or
+    # API-permission problem fails now instead of after the ~15-minute build.
+    ensure_appstore_profiles(variants, api_key)
+
+    # The worktree is a sibling of the repo, NOT under $TMPDIR: the project may
+    # reference local Swift packages by relative path (XCLocalSwiftPackageReference,
+    # e.g. ../ZcashLightClientKit), and only a sibling worktree resolves those to
+    # the same directories the primary checkout uses in Xcode.
+    worktree = File.join(File.dirname(repo_root), "zodl-release-#{sha[0, 8]}")
+    begin
+      UI.message("Creating a clean build worktree at #{sha[0, 8]}…")
+      run("git -C #{repo_root.shellescape} worktree add --detach #{worktree.shellescape} #{sha}", must_succeed: true)
+      FileUtils.cp(File.join(repo_root, PARTNER_KEYS_REL), File.join(worktree, PARTNER_KEYS_REL))
+
+      Dir.chdir(worktree) do
+        # Absolute paths, anchored to the worktree: fastlane runs each action inside
+        # `Dir.chdir("..")`, which from here lands in the worktree's PARENT, so any
+        # RELATIVE path passed to run_tests/build_app would resolve there and break.
+        paths = Zodl::BuildPaths.resolve(worktree)
+        UI.message("Resolving Swift packages…")
+        run("xcodebuild -project #{PROJECT} -scheme #{TEST_SCHEME} -resolvePackageDependencies", must_succeed: true)
+        run_unit_tests(paths) unless truthy(options[:skip_tests])
+        variants.each do |variant|
+          UI.message("Building and uploading #{variant}…")
+          build_and_upload(variant, version, build, api_key, paths, auth_xcargs)
+        end
+      end
+    ensure
+      if File.directory?(worktree)
+        UI.message("Cleaning up the build worktree…")
+        run("git -C #{repo_root.shellescape} worktree remove --force #{worktree.shellescape}")
+      end
+    end
+  end
+
+  if submit_review
+    UI.message("Submitting to App Review…")
+    submit_to_review(submission, api_key)
+    verify_submission_metadata(submission)
+  end
+
+  Zodl::Notify.post(event: submit_review ? :submit_success : :success, variants: variants, version: version, build: build)
+  done = building ? "Done: #{variants.join(', ')} #{version} (#{build}) from #{ref} @ #{sha[0, 8]}" : "Done: appstore #{version} (#{build})"
+  done += " — submitted to App Review" if submit_review
+  UI.success(done)
+end
+
+desc "Set MARKETING_VERSION and CURRENT_PROJECT_VERSION for a target scope and commit. Driven by Scripts/bump.sh."
+lane :bump do |options|
+  version = options.fetch(:version)
+  build   = Integer(options.fetch(:build))
+  selector = options[:target].to_s
+  UI.user_error!("target is required — an Xcode target name, 'ios' (all iOS app targets), 'mac' (all macOS app targets), or 'all'") if selector.empty?
+  UI.user_error!("version '#{version}' is not in X.Y.Z form") unless Zodl::Version.valid?(version)
+  targets = begin
+    Zodl::Variants.bump_targets(selector)
+  rescue ArgumentError => e
+    UI.user_error!(e.message)
+  end
+  repo_root = run("git rev-parse --show-toplevel", must_succeed: true).strip
+
+  Dir.chdir(repo_root) do
+    UI.message("Setting #{targets.join(', ')} to #{version} (#{build})…")
+    set_versions(targets, version, build)
+    UI.message("Committing the version bump…")
+    run("git add secant.xcodeproj/project.pbxproj", must_succeed: true)
+    run("git commit -m #{"Bump #{selector} to #{version} (#{build})".shellescape}", must_succeed: true)
+  end
+
+  UI.success("Bumped #{selector} to #{version} (#{build}) and committed.")
+end
+
+# Notify on a failed release. The success and dry-run paths post inline (where
+# the full context is in scope); this hook catches every other abort/exception.
+# Posting is failure-safe and never changes the exit status — fastlane still
+# re-raises after this block. `bump` is intentionally not covered.
+error do |lane, exception|
+  next unless lane.to_s == "release"
+  # A declined confirmation prompt is a deliberate user stop, not a failure.
+  next if exception.message.to_s.start_with?("Aborted")
+
+  context = @notify_context || {}
+  Zodl::Notify.post(
+    event: :failure,
+    variants: context[:variants] || [],
+    version: context[:version],
+    build: context[:build],
+    reason: exception.message
+  )
+end
+
+# --- helpers -------------------------------------------------------------
+
+# Runs a shell command WITHOUT creating a fastlane "shell command" step (those
+# are unlabelled and noisy). Returns captured stdout. With must_succeed:, a
+# non-zero exit aborts the lane with the command's stderr.
+def run(command, must_succeed: false)
+  stdout, stderr, status = Open3.capture3("/bin/sh", "-c", command)
+  if must_succeed && !status.success?
+    UI.user_error!("Command failed (exit #{status.exitstatus}): #{command}\n#{stderr.strip}")
+  end
+  stdout
+end
+
+# Like `run`, but argv form (no shell) with must-succeed semantics and an
+# optional retry for flaky external tools (hdiutil under create-dmg).
+def run_argv(argv, retries: 0)
+  attempts = 0
+  begin
+    attempts += 1
+    stdout, stderr, status = Open3.capture3(*argv)
+    unless status.success?
+      raise "#{argv.first} failed (exit #{status.exitstatus}): #{stderr.strip.empty? ? stdout.strip : stderr.strip}"
+    end
+    stdout
+  rescue RuntimeError, SystemCallError => e
+    retry if attempts <= retries
+    UI.user_error!(e.message)
+  end
+end
+
+def truthy(value)
+  ["1", "true", "yes", true].include?(value)
+end
+
+def asc_api_key
+  # A relative ASC_KEY_FILEPATH is resolved against fastlane/, so a developer can
+  # drop the .p8 in fastlane/ and reference it by filename. Absolute paths work too.
+  app_store_connect_api_key(
+    key_id: ENV.fetch("ASC_KEY_ID"),
+    issuer_id: ENV.fetch("ASC_ISSUER_ID"),
+    key_filepath: File.expand_path(ENV.fetch("ASC_KEY_FILEPATH"), FASTLANE_DIR)
+  )
+end
+
+# Lazily fetched so flows that never touch App Store Connect (a DMG-channel
+# --dry-run has no TestFlight train to query) work without ASC credentials.
+def api_key
+  @api_key ||= asc_api_key
+end
+
+# xcodebuild flags that authenticate automatic signing (-allowProvisioningUpdates)
+# with the App Store Connect API key. gym/build_app has no api_key option, so
+# without these the export step can't reach App Store Connect to create the
+# distribution profile the entitlements need (Associated Domains, iCloud) and
+# falls back to Xcode's stored GUI accounts — failing on a stale one. Same key as
+# asc_api_key. The path is anchored on the absolute repo_root (NOT the cwd-relative
+# FASTLANE_DIR): build_app runs inside Dir.chdir(worktree), so FASTLANE_DIR would
+# resolve into the worktree — which has no .p8 — and xcodebuild would reject the
+# path as non-existent. Checked here so we fail fast, not minutes into the build.
+def asc_auth_xcargs(repo_root)
+  key_path = File.expand_path(ENV.fetch("ASC_KEY_FILEPATH"), File.join(repo_root, "fastlane"))
+  UI.user_error!("ASC API key not found at #{key_path} — set ASC_KEY_FILEPATH in fastlane/.env") unless File.exist?(key_path)
+  [
+    "-authenticationKeyPath #{key_path.shellescape}",
+    "-authenticationKeyID #{ENV.fetch('ASC_KEY_ID').shellescape}",
+    "-authenticationKeyIssuerID #{ENV.fetch('ASC_ISSUER_ID').shellescape}"
+  ].join(" ")
+end
+
+# Latest build number for an app+version on App Store Connect (TestFlight train).
+# initial_build_number: 0 makes the action return 0 (not raise) when there is no
+# build yet for this version, so any exception below is a genuine failure.
+def latest_build_number(api_key, app_identifier, version)
+  app_store_build_number(
+    api_key: api_key,
+    app_identifier: app_identifier,
+    version: version,
+    live: false,
+    initial_build_number: 0
+  )
+rescue StandardError => e
+  # Fail closed: treating an auth/network/API failure as "latest = 0" would let
+  # any requested build number pass the preflight build-number check and upload a
+  # duplicate or regressing build. Abort instead so the developer can retry.
+  UI.user_error!("Could not fetch the latest build number for #{app_identifier} #{version} from App Store Connect (#{e.message}). Re-run once App Store Connect is reachable.")
+end
+
+# The project file as committed at `sha` — the version source of truth for the
+# ref being built (NOT the current checkout).
+def pbxproj_at(repo_root, sha)
+  run("git -C #{repo_root.shellescape} show #{sha}:#{Zodl::BuildPaths::PROJECT}/project.pbxproj", must_succeed: true)
+end
+
+# MARKETING_VERSION of the variant's own target. Targets are versioned
+# independently (the macOS app does not track the iOS version), so the check
+# must read the target this variant actually builds — never a whole-file first
+# match. nil (target/setting not found) skips the preflight version check.
+# NOTE: not currently called — the release lane's build-number preflight uses
+# marketing_version_at (single, whole-project version) below; wiring per-target
+# macOS versioning back into the release lane is part of the deferred mac-lane
+# repair (see marketing_version_at for the active mechanism).
+def marketing_version_for(pbxproj, target)
+  versions = Zodl::Pbxproj.marketing_versions(pbxproj, target: target)
+  if versions.size > 1
+    UI.user_error!("target '#{target}' configurations disagree on MARKETING_VERSION (#{versions.join(', ')}) — align them in the project")
+  end
+  versions.first
+end
+
+# Rewrites MARKETING_VERSION and CURRENT_PROJECT_VERSION inside each named
+# target's own configuration blocks. agvtool has no per-target mode, and every
+# Info.plist references these build settings, so pbxproj surgery is the whole
+# job. Targets not named keep their versions — macOS is versioned independently
+# of iOS. Used by the `bump` lane above (multi-target, selector-scoped).
+def set_versions(targets, version, build)
+  path = "#{Zodl::BuildPaths::PROJECT}/project.pbxproj"
+  text = File.read(path)
+  targets.each do |target|
+    text = Zodl::Pbxproj.set_setting(text, target: target, key: "MARKETING_VERSION", value: version)
+    text = Zodl::Pbxproj.set_setting(text, target: target, key: "CURRENT_PROJECT_VERSION", value: build.to_s)
+  end
+  File.write(path, text)
+end
+
+# MARKETING_VERSION as committed at `sha`. All app targets share one value, so
+# the first MARKETING_VERSION line in the project at that commit is correct.
+def marketing_version_at(repo_root, sha)
+  line = run("git -C #{repo_root.shellescape} show #{sha}:secant.xcodeproj/project.pbxproj | grep -m1 'MARKETING_VERSION ='")
+  line[/MARKETING_VERSION = ([^;]+);/, 1]&.strip
+end
+
+# Local Swift package references (XCLocalSwiftPackageReference) in the project
+# as committed at `sha`, with the live state of each referenced directory. The
+# relativePath is relative to the .xcodeproj's directory — the repo root here —
+# and the build worktree is the repo's sibling, so the reference resolves to the
+# same directory for both. The referenced checkout is consumed as-is (HEAD plus
+# any uncommitted changes), so capture its git state for the preflight report.
+def local_packages_at(repo_root, sha)
+  pbxproj = run("git -C #{repo_root.shellescape} show #{sha}:secant.xcodeproj/project.pbxproj", must_succeed: true)
+  Zodl::LocalPackages.parse(pbxproj).map do |rel|
+    resolved = File.expand_path(rel, repo_root)
+    unless File.directory?(resolved)
+      next { path: rel, resolved: resolved, exists: false, git: nil, dirty: nil }
+    end
+
+    head = run("git -C #{resolved.shellescape} rev-parse --short HEAD 2>/dev/null").strip
+    git = head.empty? ? nil : head
+    dirty = git && !run("git -C #{resolved.shellescape} status --porcelain 2>/dev/null").strip.empty?
+    { path: rel, resolved: resolved, exists: true, git: git, dirty: dirty }
+  end
+end
+
+# Resolves a branch/tag/commit to a commit SHA. Prefers origin/<ref> so a release
+# built from a branch name uses the freshly-fetched origin tip, not a possibly-stale
+# local branch of the same name; falls back to the bare ref, which is what resolves
+# tags and commit SHAs (origin/<tag> and origin/<sha> don't exist).
+def resolve_sha(repo_root, ref)
+  ["origin/#{ref}", "#{ref}"].each do |candidate|
+    out = run("git -C #{repo_root.shellescape} rev-parse --verify --quiet #{candidate.shellescape}^{commit}").strip
+    return out unless out.empty?
+  end
+  UI.user_error!("Could not resolve ref '#{ref}' (tried 'origin/#{ref}' and '#{ref}'). Fetch or push it first.")
+end
+
+def ref_on_origin?(repo_root, sha)
+  # branch -r --contains lists only remote-tracking branches, never tags. A
+  # release built from a tag whose commit isn't on a remote branch is still on
+  # origin if the tag is pushed, so also match the sha against origin's tags
+  # (ls-remote prints the tagged commit on the ^{} line for annotated tags).
+  on_branch = !run("git -C #{repo_root.shellescape} branch -r --contains #{sha} 2>/dev/null").strip.empty?
+  return true if on_branch
+
+  run("git -C #{repo_root.shellescape} ls-remote --tags origin 2>/dev/null").lines.any? do |line|
+    line.split(/\s+/).first == sha
+  end
+end
+
+def dirty_tree?(repo_root)
+  !run("git -C #{repo_root.shellescape} status --porcelain").strip.empty?
+end
+
+# Runs the archive-time PartnerKeys validator and returns nil when it passes, or
+# the validator's specific complaint (e.g. "PartnerKeys.plist: missing key 'x'").
+def partner_keys_error(repo_root)
+  script = File.join(repo_root, "Scripts/validate-partner-keys.sh")
+  stdout, _stderr, status = Open3.capture3({ "ACTION" => "install", "SRCROOT" => repo_root }, "bash", script)
+  return nil if status.success?
+
+  detail = stdout.lines.map(&:strip).find { |l| l.start_with?("error:") }
+  detail ? detail.sub(/^error:\s*/, "") : "PartnerKeys.plist is missing or invalid"
+end
+
+def xcode_ok?(repo_root)
+  pinned = File.read(File.join(repo_root, ".xcode-version")).strip
+  current = run("xcodebuild -version")[/Xcode (\S+)/, 1]
+  current == pinned
+rescue StandardError
+  false
+end
+
+# Facts about the sibling ZcashLightClientKit checkout this branch builds
+# against (local Swift package reference ../ZcashLightClientKit).
+def sdk_facts(repo_root)
+  path = File.expand_path("../ZcashLightClientKit", repo_root)
+  checkout_ok = File.directory?(path)
+  {
+    path: path,
+    checkout_ok: checkout_ok,
+    sha: checkout_ok ? run("git -C #{path.shellescape} rev-parse --short HEAD").strip : nil,
+    dirty: checkout_ok && !run("git -C #{path.shellescape} status --porcelain").strip.empty?
+  }
+end
+
+# The local FFI must carry the slice the variant links against. Folder names
+# and the xcframework Info.plist have both been caught claiming architectures
+# the binary doesn't contain, so for macOS we lipo the actual binary: a mac
+# Release archive links arm64 AND x86_64.
+def ffi_slice_ok?(sdk, platform)
+  return false unless sdk[:checkout_ok]
+
+  xcframework = File.join(sdk[:path], "LocalPackages/libzcashlc.xcframework")
+  case platform
+  when :macos
+    binary = Dir[File.join(xcframework, "macos-*", "libzcashlc.framework", "libzcashlc")].first
+    return false unless binary
+
+    archs = run("lipo -archs #{binary.shellescape} 2>/dev/null").split
+    %w[arm64 x86_64].all? { |arch| archs.include?(arch) }
+  else
+    File.directory?(File.join(xcframework, "ios-arm64"))
+  end
+end
+
+def signing_identity_ok?
+  out = run("security find-identity -v -p codesigning")
+  out.include?("Apple Distribution") || out.include?("iPhone Distribution")
+end
+
+def run_unit_tests(paths)
+  run_tests(
+    project: paths[:project],
+    scheme: TEST_SCHEME,
+    devices: [TEST_DEVICE],
+    only_testing: ["zodlTests"],
+    derived_data_path: paths[:derived_data],
+    code_coverage: false,
+    clean: false,
+    xcodebuild_formatter: XCODEBUILD_FORMATTER,
+    # Emit no scan reports. Nothing consumes them (CI runs tests on its own
+    # xcresult path, and the release lane never reads them), and HTML reports
+    # require xcpretty — which we intentionally don't use — so scan's default
+    # "html,junit" makes xcbeautify warn about the unsupported 'html' type.
+    # Pass/fail comes from the test run itself, not from these files.
+    output_types: "",
+    xcargs: "CODE_SIGNING_ALLOWED=NO #{SKIP_VALIDATION_XCARGS}"
+  )
+end
+
+# App Store distribution profile name per variant. Used both to create the profile
+# (get_provisioning_profile) and to reference it in gym's export options.
+def appstore_profile_name(variant)
+  "ZODL #{variant} App Store"
+end
+
+# Developer ID profiles are per-variant — the DMG flavors sign different
+# bundle ids and cannot share a profile.
+def developer_id_profile_name(variant)
+  "ZODL #{variant} Developer ID"
+end
+
+# Create/refresh the distribution profile each variant exports with, so a
+# signing or API-permission problem fails now instead of after the ~15-minute
+# build. force: true regenerates so the profile always carries the App ID's
+# current capabilities (Associated Domains, iCloud).
+# NOTE: not currently called — the release lane's profile step uses
+# ensure_appstore_profiles (reuse-before-renew, App Store channel only) below;
+# restoring per-channel (App Store + Developer ID) profile handling to the
+# release lane is part of the deferred mac-lane repair.
+def ensure_profiles(variants)
+  variants.each do |variant|
+    cfg = Zodl::Variants.config(variant)
+    sigh_platform = cfg[:platform] == :macos ? "macos" : "ios"
+    if cfg[:channel] == :dmg
+      get_provisioning_profile(
+        api_key: api_key,
+        app_identifier: cfg[:app_identifier],
+        provisioning_name: developer_id_profile_name(variant),
+        platform: sigh_platform,
+        developer_id: true,
+        force: true
+      )
+    else
+      get_provisioning_profile(
+        api_key: api_key,
+        app_identifier: cfg[:app_identifier],
+        provisioning_name: appstore_profile_name(variant),
+        platform: sigh_platform,
+        force: true
+      )
+    end
+  end
+end
+
+# Reuse or renew the App Store distribution profile for each variant via the ASC
+# API key, and install it into ~/Library/MobileDevice/Provisioning Profiles for
+# the export step to pick up. The readonly pass reuses the existing profile
+# without touching App Store Connect; it succeeds only when the profile is
+# ACTIVE (a capability change on the App ID — Associated Domains, iCloud —
+# flips it to INVALID), unexpired, and backed by a certificate in the local
+# keychain — exactly what exportArchive needs, and -allowProvisioningUpdates
+# does not mint such a profile. Only when reuse is impossible is the profile
+# renewed, keeping its canonical name. Name matching must be exact
+# (ignore_profiles_with_different_name): sigh's default fuzzy match happily
+# adopts one of the "<name> <timestamp>" duplicates the old force renewal left
+# behind, and the export step would then fail to find a profile under the
+# canonical name it asks for.
+def ensure_appstore_profiles(variants, api_key)
+  variants.each do |variant|
+    cfg = Zodl::Variants.config(variant)
+    name = appstore_profile_name(variant)
+    begin
+      get_provisioning_profile(
+        api_key: api_key,
+        app_identifier: cfg[:app_identifier],
+        provisioning_name: name,
+        readonly: true,
+        ignore_profiles_with_different_name: true
+      )
+    rescue FastlaneCore::Interface::FastlaneError => e
+      UI.important("Cannot reuse profile '#{name}' (#{e.message.strip}) — renewing it.")
+      renew_appstore_profile(name, cfg[:app_identifier], api_key)
+    end
+  end
+end
+
+# Replaces the profile on App Store Connect under its canonical name. The stale
+# profile must be deleted through the API first: sigh's force renewal only
+# deletes profiles it could fetch, and it never fetches a profile whose
+# certificate is missing from the local keychain — for exactly that profile it
+# would fall back to creating "<name> <timestamp>" duplicates on every run,
+# leaving the stale one in place. Deleting by exact name frees it, then sigh
+# recreates the profile with the App ID's current capabilities and a locally
+# installed certificate; fail_on_name_taken turns any leftover name collision
+# into a loud failure instead of another duplicate. Spaceship is already loaded
+# here: the failed readonly get_provisioning_profile above required sigh, which
+# requires spaceship.
+def renew_appstore_profile(name, app_identifier, api_key)
+  Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.from(hash: api_key)
+  Spaceship::ConnectAPI::Profile.all(filter: { name: name })
+    .select { |profile| profile.name == name }
+    .each(&:delete!)
+
+  get_provisioning_profile(
+    api_key: api_key,
+    app_identifier: app_identifier,
+    provisioning_name: name,
+    fail_on_name_taken: true,
+    ignore_profiles_with_different_name: true
+  )
+end
+
+# Run a block with Apple's /usr/bin ahead of everything else in PATH, then restore
+# it. Xcode's exportArchive copies the app into the .ipa with
+# `/usr/bin/rsync -8aPhhE` — Apple's rsync, where -E means --extended-attributes.
+# For a local copy rsync forks a helper ("server") child resolved via $PATH by bare
+# name; a Homebrew rsync 3.x earlier in PATH (there -E is --executability and
+# --extended-attributes is unknown) rejects the option, so the export dies with
+# "Copy failed" / "rsync error: syntax or usage error … [server=3.x]". Pinning
+# /usr/bin first makes both ends Apple's rsync, so the build works whether or not a
+# Homebrew rsync is installed. Safe here because the fastlane Ruby is already
+# running (via rbenv's bundler); this only changes PATH for child processes (gym →
+# xcodebuild) spawned inside the block, and the caller's PATH is restored after.
+def with_system_rsync_first
+  previous_path = ENV["PATH"]
+  ENV["PATH"] = "/usr/bin:#{previous_path}"
+  yield
+ensure
+  ENV["PATH"] = previous_path
+end
+
+def build_and_upload(variant, version, build, api_key, paths, auth_xcargs)
+  cfg = Zodl::Variants.config(variant)
+
+  ipa = with_system_rsync_first do
+    build_app(
+      project: paths[:project],
+      scheme: cfg[:scheme],
+      configuration: cfg[:configuration],
+      export_method: "app-store",
+      output_directory: paths[:output_dir],
+      output_name: "#{variant}-#{version}-#{build}.ipa",
+      clean: true,
+      derived_data_path: paths[:derived_data],
+      xcodebuild_formatter: XCODEBUILD_FORMATTER,
+      xcargs: "CURRENT_PROJECT_VERSION=#{build} -allowProvisioningUpdates #{auth_xcargs} #{SKIP_VALIDATION_XCARGS}",
+      export_options: {
+        signingStyle: "manual",
+        teamID: TEAM_ID,
+        provisioningProfiles: { cfg[:app_identifier] => appstore_profile_name(variant) }
+      }
+    )
+  end
+
+  upload_to_testflight(
+    api_key: api_key,
+    app_identifier: cfg[:app_identifier],
+    ipa: ipa,
+    skip_submission: true,
+    distribute_external: false,
+    skip_waiting_for_build_processing: false # wait for App Store Connect processing
+  )
+
+  UI.success("Uploaded #{cfg[:app_identifier]} #{version} (#{build}) to TestFlight.")
+end
+
+# NOTE: not currently called by build_and_upload above (which only builds the
+# plain iOS TestFlight path pending mac-lane repair — see build_and_upload).
+# Preserved intact: exports+uploads a macOS TestFlight package.
+def mac_testflight(variant, cfg, version, build, paths, auth_xcargs)
+  # gym/build_app strips only a trailing ".ipa" from output_name and appends
+  # ".pkg" itself for a macOS package export, so an output_name that already
+  # ends in ".pkg" comes out "….pkg.pkg". Pass an extension-less base name.
+  pkg_base = "#{variant}-#{version}-#{build}"
+  with_system_rsync_first do
+    build_app(
+      project: paths[:project],
+      scheme: cfg[:scheme],
+      configuration: cfg[:configuration],
+      export_method: "app-store",
+      destination: "generic/platform=macOS",
+      output_directory: paths[:output_dir],
+      output_name: pkg_base,
+      clean: true,
+      derived_data_path: paths[:derived_data],
+      xcodebuild_formatter: XCODEBUILD_FORMATTER,
+      xcargs: "CURRENT_PROJECT_VERSION=#{build} -allowProvisioningUpdates #{auth_xcargs} #{SKIP_VALIDATION_XCARGS}",
+      export_options: {
+        signingStyle: "manual",
+        teamID: TEAM_ID,
+        signingCertificate: "Apple Distribution",
+        installerSigningCertificate: "Mac Installer Distribution",
+        provisioningProfiles: { cfg[:app_identifier] => appstore_profile_name(variant) }
+      }
+    )
+  end
+  pkg = File.join(paths[:output_dir], "#{pkg_base}.pkg")
+  UI.user_error!("expected the exported package at #{pkg}") unless File.exist?(pkg)
+
+  upload_to_testflight(
+    api_key: api_key,
+    app_identifier: cfg[:app_identifier],
+    pkg: pkg,
+    app_platform: "osx",
+    skip_submission: true,
+    distribute_external: false,
+    skip_waiting_for_build_processing: false
+  )
+  UI.success("Uploaded #{cfg[:app_identifier]} #{version} (#{build}) [macOS] to TestFlight.")
+  "#{variant} → TestFlight"
+end
+
+def mac_dmg(variant, cfg, version, build, paths, auth_xcargs, repo_root, app_name)
+  with_system_rsync_first do
+    build_app(
+      project: paths[:project],
+      scheme: cfg[:scheme],
+      configuration: cfg[:configuration],
+      export_method: "developer-id",
+      destination: "generic/platform=macOS",
+      output_directory: paths[:output_dir],
+      clean: true,
+      derived_data_path: paths[:derived_data],
+      xcodebuild_formatter: XCODEBUILD_FORMATTER,
+      xcargs: "CURRENT_PROJECT_VERSION=#{build} -allowProvisioningUpdates #{auth_xcargs} #{SKIP_VALIDATION_XCARGS}",
+      export_options: {
+        signingStyle: "manual",
+        teamID: TEAM_ID,
+        signingCertificate: "Developer ID Application",
+        provisioningProfiles: { cfg[:app_identifier] => developer_id_profile_name(variant) }
+      }
+    )
+  end
+  bundle_name = "#{app_name}.app"
+  app = File.join(paths[:output_dir], bundle_name)
+  UI.user_error!("expected the exported app at #{app}") unless File.directory?(app)
+
+  UI.message("Notarizing #{bundle_name}…")
+  notarize(package: app, bundle_id: cfg[:app_identifier], api_key: api_key, print_log: true)
+
+  # create-dmg images the whole source folder, so stage a folder holding only
+  # the app. ditto (not cp) preserves the code signature and extended attrs.
+  staging = File.join(paths[:output_dir], "dmg-staging")
+  FileUtils.rm_rf(staging)
+  FileUtils.mkdir_p(staging)
+  run("ditto #{app.shellescape} #{File.join(staging, bundle_name).shellescape}", must_succeed: true)
+
+  dmg = File.join(paths[:output_dir], Zodl::Dmg.filename(flavor: cfg[:flavor], version: version, build: build))
+  FileUtils.rm_f(dmg)
+  icns = Dir[File.join(app, "Contents", "Resources", "*.icns")].sort
+  volicon = icns.find { |path| File.basename(path) == "AppIcon.icns" } || icns.first
+  # Window background with the app→Applications arrow baked in (HiDPI TIFF,
+  # regenerable via fastlane/assets/render-dmg-background.swift). Resolved from
+  # the worktree (paths[:output_dir] is <worktree>/build) so the built ref's own
+  # asset is used; skipped gracefully if the ref predates it.
+  background = File.join(File.dirname(paths[:output_dir]), "fastlane", "assets", "dmg-background.tiff")
+  run_argv(
+    Zodl::Dmg.create_dmg_command(
+      app_name: bundle_name, source_dir: staging, dmg_path: dmg, volname: app_name,
+      volicon: volicon, background: File.exist?(background) ? background : nil
+    ),
+    retries: 1 # hdiutil occasionally fails with "Resource busy"; one retry clears it
+  )
+  run_argv(Zodl::Dmg.codesign_command(path: dmg))
+
+  UI.message("Notarizing the DMG…")
+  notarize(package: dmg, bundle_id: cfg[:app_identifier], api_key: api_key, print_log: true)
+
+  final_dir = File.join(repo_root, "build")
+  FileUtils.mkdir_p(final_dir)
+  final = File.join(final_dir, File.basename(dmg))
+  FileUtils.cp(dmg, final)
+  UI.success("DMG ready: #{final}")
+  "#{variant} → DMG at #{final}"
+end
+
+# --- App Review submission -----------------------------------------------
+
+# ASC version states that mean a version record is history, not in flight.
+TERMINAL_VERSION_STATES = %w[
+  READY_FOR_SALE REPLACED_WITH_NEW_VERSION REMOVED_FROM_SALE DEVELOPER_REMOVED_FROM_SALE
+].freeze
+
+# Gathers every fact the submit preflight needs from App Store Connect and the
+# repo's WhatsNew files, and precomputes the plans the submission will apply.
+# All reads — nothing here writes to App Store Connect (dry-run safe).
+def submit_facts(api_key, repo_root, version, build, ref_given:)
+  require "spaceship"
+  cfg = Zodl::Variants.config("appstore")
+  Spaceship::ConnectAPI.token = Spaceship::ConnectAPI::Token.from(hash: api_key)
+  app = Spaceship::ConnectAPI::App.find(cfg[:app_identifier])
+  UI.user_error!("App #{cfg[:app_identifier]} not found on App Store Connect") unless app
+
+  platform = Spaceship::ConnectAPI::Platform::IOS
+  live = app.get_live_app_store_version(platform: platform)
+  inflight = inflight_app_store_version(app, live)
+  build_state = asc_build_state(app, version, build)
+  attached_build = inflight&.build&.version&.to_i
+
+  edit_locs = inflight ? inflight.get_app_store_version_localizations : []
+  live_locs = live ? live.get_app_store_version_localizations : []
+  # The in-flight version's locales are authoritative once it exists; before it
+  # exists (build path, or nothing created yet) the live version's locales are
+  # what the new record will inherit.
+  locales = (inflight ? edit_locs : live_locs).map(&:locale).sort
+  UI.user_error!("No App Store localizations found for #{cfg[:app_identifier]}") if locales.empty?
+
+  whats_new = Zodl::WhatsNew.resolve(dir: File.join(repo_root, WHATS_NEW_REL), locales: locales, version: version)
+  promo_plan = Zodl::SubmitPreflight.promotional_text_plan(
+    locales: locales,
+    edit: edit_locs.to_h { |loc| [loc.locale, loc.promotional_text] },
+    live: live_locs.to_h { |loc| [loc.locale, loc.promotional_text] }
+  )
+
+  ctx = Zodl::SubmitPreflight::Context.new(
+    variant: "appstore", requested_version: version, requested_build: build,
+    ref_given: ref_given, build_state: build_state,
+    version_state: inflight&.app_store_state, version_string: inflight&.version_string,
+    live_version: live&.version_string, whats_new_errors: whats_new.errors
+  )
+
+  {
+    app: app, cfg: cfg, version: version, build: build, ctx: ctx,
+    report: Zodl::SubmitPreflight.check(ctx),
+    whats_new: whats_new, promo_plan: promo_plan,
+    build_action: Zodl::SubmitPreflight.build_action(attached: attached_build, requested: build),
+    attached_build: attached_build
+  }
+end
+
+# The one non-live version "in flight" (ASC allows at most one), whatever its
+# state — created manually or by a previous run. nil when only live/history
+# version records exist.
+def inflight_app_store_version(app, live)
+  versions = app.get_app_store_versions(filter: { platform: Spaceship::ConnectAPI::Platform::IOS }, includes: "build")
+  versions.find do |v|
+    next false if live && v.id == live.id
+
+    !TERMINAL_VERSION_STATES.include?(v.app_store_state)
+  end
+end
+
+# TestFlight processing state of build (version, build_number) for this app:
+# :absent, :processing, :processed, or :failed.
+def asc_build_state(app, version, build_number)
+  builds = app.get_builds(
+    filter: { "preReleaseVersion.version" => version, version: build_number.to_s },
+    sort: "-uploadedDate"
+  )
+  found = builds.first
+  return :absent unless found
+
+  case found.processing_state
+  when "VALID" then :processed
+  when "PROCESSING" then :processing
+  else :failed
+  end
+end
+
+# Submits the build to App Review via deliver. The binary is already on App
+# Store Connect (uploaded by this run or a previous one), so this manages only
+# the version record, metadata, build attachment, and the submission itself.
+# automatic_release stays false — after approval the release is triggered by a
+# human in App Store Connect, mirroring the manual process.
+def submit_to_review(sub, api_key)
+  promo = sub[:promo_plan].select { |_, plan| plan[:action] == :copy }.transform_values { |plan| plan[:text] }
+  opts = {
+    api_key: api_key,
+    app_identifier: sub[:cfg][:app_identifier],
+    app_version: sub[:version],
+    build_number: sub[:build].to_s,
+    skip_binary_upload: true,
+    skip_screenshots: true,
+    release_notes: sub[:whats_new].notes,
+    submit_for_review: true,
+    automatic_release: false,
+    submission_information: { add_id_info_uses_idfa: false },
+    precheck_include_in_app_purchases: false, # the API key cannot check IAP — ZODL has none
+    force: true # non-interactive: skip deliver's HTML preview confirmation
+  }
+  opts[:promotional_text] = promo unless promo.empty?
+  # When this run also built, build_app left its ipa path in the lane context, and
+  # upload_to_app_store silently inherits it (config[:ipa] ||= lane_context[...])
+  # and verifies the file exists — but the build worktree holding it is already
+  # removed by then, and this step never needs the binary (skip_binary_upload).
+  Actions.lane_context.delete(Actions::SharedValues::IPA_OUTPUT_PATH)
+  upload_to_app_store(**opts)
+  UI.success("Submitted #{sub[:cfg][:app_identifier]} #{sub[:version]} (#{sub[:build]}) to App Review.")
+end
+
+# Reads back what App Store Connect now holds for the submitted version and
+# warns when promotional text is missing where a copy was planned —
+# promotional text is editable without a new review, so the warning is
+# actionable. Read-only and failure-safe: a verification hiccup never fails a
+# submission that already went through.
+def verify_submission_metadata(sub)
+  version_record = sub[:app].get_app_store_versions(
+    filter: { versionString: sub[:version], platform: Spaceship::ConnectAPI::Platform::IOS }
+  ).first
+  unless version_record
+    UI.important("Could not re-read version #{sub[:version]} from App Store Connect for verification.")
+    return
+  end
+
+  UI.message("──────── App Store Connect now has (#{sub[:version]}) ────────")
+  version_record.get_app_store_version_localizations.sort_by(&:locale).each do |loc|
+    promo = loc.promotional_text.to_s.strip
+    notes = loc.whats_new.to_s.strip
+    UI.message("  #{loc.locale}: promotional text #{promo.empty? ? '(empty)' : 'set'}, what's new #{notes.empty? ? '(EMPTY)' : 'set'}")
+    plan = sub[:promo_plan][loc.locale]
+    if promo.empty? && plan && plan[:action] != :none
+      UI.important("  warning: #{loc.locale}: promotional text is EMPTY on #{sub[:version]} — fix it in App Store Connect (editable without a new review).")
+    end
+  end
+rescue StandardError => e
+  UI.important("Verification read-back failed (#{e.message}) — check App Store Connect manually.")
+end
+
+def print_submit_summary(sub)
+  ctx = sub[:ctx]
+  UI.message("──────── submit preflight: appstore ────────")
+  UI.message("  app            #{sub[:cfg][:app_identifier]}")
+  UI.message("  version        #{sub[:version]} #{version_record_note(sub)}")
+  UI.message("  build          #{sub[:build]} (#{build_action_note(sub)})")
+  UI.message("  release mode   manual — you release in App Store Connect after approval")
+  UI.message("  live version   #{ctx.live_version || 'none'}")
+  sub[:whats_new].notes.each_key do |locale|
+    UI.message("  #{locale}  what's new: #{sub[:whats_new].sources[locale]}, promotional text: #{promo_note(sub[:promo_plan][locale])}")
+  end
+  sub[:whats_new].notes.each do |locale, text|
+    UI.message("  ── What's New (#{locale}) ──")
+    text.each_line { |line| UI.message("  │ #{line.chomp}") }
+  end
+  sub[:promo_plan].each do |locale, plan|
+    UI.message("  ── Promotional text to copy (#{locale}) ──\n  │ #{plan[:text]}") if plan[:action] == :copy
+  end
+  sub[:report].warnings.each { |w| UI.important("  warning: #{w}") }
+  sub[:report].errors.each { |e| UI.error("  error:   #{e}") }
+end
+
+def version_record_note(sub)
+  ctx = sub[:ctx]
+  if ctx.version_state.nil?
+    "— new version record will be created"
+  elsif ctx.version_string == sub[:version]
+    "— reusing the existing #{ctx.version_state} version"
+  else
+    "— renaming the existing #{ctx.version_state} version #{ctx.version_string}"
+  end
+end
+
+def build_action_note(sub)
+  case sub[:build_action]
+  when :attach then "will be attached"
+  when :keep then "already attached"
+  when :replace then "replacing attached build #{sub[:attached_build]}"
+  end
+end
+
+def promo_note(plan)
+  case plan[:action]
+  when :keep then "kept (already set on the version)"
+  when :copy then "copied from the live version"
+  when :none then "nothing to copy (not set on the live version)"
+  end
+end
+
+def print_summary(variant, cfg, ref, sha, ctx, report)
+  UI.message("──────── preflight: #{variant} ────────")
+  UI.message("  scheme/target  #{cfg[:scheme]} / #{cfg[:target]} (#{cfg[:configuration]})")
+  UI.message("  app            #{cfg[:app_identifier]}")
+  UI.message("  ref            #{ref} @ #{sha[0, 8]}")
+  UI.message("  version        #{ctx.requested_version} (project #{ctx.project_version})")
+  UI.message("  build          #{ctx.requested_build} (latest on ASC #{ctx.latest_build})")
+  report.warnings.each { |w| UI.important("  warning: #{w}") }
+  report.errors.each { |e| UI.error("  error:   #{e}") }
+end

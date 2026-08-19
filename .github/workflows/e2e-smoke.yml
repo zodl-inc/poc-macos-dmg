@@ -1,0 +1,404 @@
+name: E2E Smoke Tests
+
+on:
+  pull_request:
+    # Include ready_for_review so flipping a draft PR to "Ready for review"
+    # re-triggers CI. The default activity types are opened/synchronize/
+    # reopened only, so without this the draft-skipped jobs below would never
+    # run until the next push.
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - '.github/ISSUE_TEMPLATE/*'
+      - '.github/pull_request_template.md'
+      - 'LICENSE'
+      - 'README.md'
+      - 'docs/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # flexa-ios uses iOS 26's `.glass` button style which isn't available
+  # on the macos-15 runner's Xcode. Disable it to keep CI building.
+  FX_ENABLE_GLASS: "0"
+  DERIVED_DATA_PATH: build
+  SOURCE_PACKAGES_PATH: build/SourcePackages
+
+jobs:
+  # Build once and share the .app bundle with both phase matrix jobs
+  # via actions/upload-artifact. The previous matrix design ran
+  # xcodebuild + SPM resolve in each phase job, paying ~7 min twice.
+  build:
+    # Skip draft PRs — the e2e/smoke suite is expensive (up to 75-min runs
+    # that spend real mainnet funds). Manual `workflow_dispatch` runs carry
+    # no pull_request context, so the guard lets them through.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: macos-26
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Select latest Xcode
+        # macos-15 runners ship multiple Xcodes; default-selected may be 16.x.
+        # XCUITest from older Xcode driving an iOS 26 sim causes maestro tap/
+        # input quirks (empty seed fields). Pin to the newest Xcode available.
+        run: |
+          LATEST=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$LATEST" ]; then
+            echo "Selecting $LATEST"
+            sudo xcode-select -s "$LATEST/Contents/Developer"
+          fi
+          xcodebuild -version
+
+      - name: Checkout app
+        uses: actions/checkout@v4
+
+      # Synchronized Xcode groups resolve .app bundle membership from the
+      # on-disk file tree *before* build phases run. PartnerKeys.plist is
+      # gitignored, so on a clean checkout it isn't present at planning time
+      # and never gets copied into the bundle (the old "Generate
+      # PartnerKeys.plist" build phase wrote it too late to be picked up).
+      # Drop a valid empty stub here, pre-build, so the resource exists in the
+      # .app; the real NEAR keys are written into it by the inject step below.
+      - name: Stub PartnerKeys.plist (pre-build; sync groups need it on disk)
+        run: |
+          PK="secant/Resources/PartnerKeys.plist"
+          [ -f "$PK" ] || printf '%s\n' \
+            '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+            '<plist version="1.0">' \
+            '<dict/>' \
+            '</plist>' > "$PK"
+
+      - name: Compute Xcode cache key
+        id: xcode-cache-key
+        run: |
+          xcodebuild -version
+          xcodebuild -version | shasum -a 256 | awk '{ print "hash="$1 }' >> "$GITHUB_OUTPUT"
+
+      - name: Restore Swift package cache
+        id: spm-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ env.SOURCE_PACKAGES_PATH }}
+          key: ${{ runner.os }}-${{ runner.arch }}-xcode-spm-e2e-${{ steps.xcode-cache-key.outputs.hash }}-${{ hashFiles('secant.xcodeproj/project.pbxproj', 'secant.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-xcode-spm-e2e-${{ steps.xcode-cache-key.outputs.hash }}-
+            ${{ runner.os }}-${{ runner.arch }}-xcode-spm-e2e-
+
+      - name: Resolve packages
+        run: |
+          xcodebuild -project secant.xcodeproj \
+            -scheme zodl-internal \
+            -resolvePackageDependencies \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_PATH"
+
+      - name: Save Swift package cache
+        if: ${{ steps.spm-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ env.SOURCE_PACKAGES_PATH }}
+          key: ${{ steps.spm-cache.outputs.cache-primary-key }}
+
+      - name: Restore cached .app bundle
+        # Keyed on hashes of every input that affects the build output.
+        # On hit, skip xcodebuild and just upload the restored bundle.
+        # Misses fall through to a normal build.
+        id: app-cache
+        uses: actions/cache@v5
+        with:
+          path: build/Build/Products/Debug-iphonesimulator
+          key: ${{ runner.os }}-${{ runner.arch }}-ios-app-${{ steps.xcode-cache-key.outputs.hash }}-${{ hashFiles('secant/Sources/**', 'modules/Sources/**', 'secant.xcodeproj/**/*.pbxproj', 'secant.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+
+      - name: Build for simulator
+        if: steps.app-cache.outputs.cache-hit != 'true'
+        # Ad-hoc sign ("-") so the app's entitlements (Keychain access group
+        # etc.) are embedded in the build. Plain CODE_SIGNING_ALLOWED=NO
+        # leaves the bundle without entitlements, which makes the app crash
+        # on launch with error -34018 (errSecMissingEntitlement) the moment
+        # it touches the Keychain.
+        run: |
+          xcodebuild build \
+            -project secant.xcodeproj \
+            -scheme zodl-internal \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=latest' \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_PATH" \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGNING_REQUIRED=NO \
+            IPHONEOS_DEPLOYMENT_TARGET=16.0
+
+      # Inject the real PartnerKeys.plist DIRECTLY into the built .app
+      # bundle, replacing the empty `<dict/>` dummy that the Xcode build
+      # phase writes when the source plist is absent (it's gitignored).
+      # Writing post-build (not pre-build) handles both code paths
+      # uniformly: cache hit (no xcodebuild ran) AND fresh build (the
+      # plist generation phase wrote the dummy into the bundle). In
+      # either case the .app bundle at the path below exists and we
+      # overwrite the bundle's PartnerKeys.plist resource.
+      #
+      # Two surgical secrets instead of the whole plist base64: the
+      # e2e suite only exercises NEAR swap/pay paths, which
+      # `Near1Click.swift` reads via PartnerKeys.{nearKey,
+      # nearFeeDepositAddress}. Flexa / Coinbase / CMC keys aren't on
+      # any e2e code path. Values are JWT-shaped and 0x-prefixed hex
+      # — both safe to drop into XML without escaping.
+      #
+      # Skips silently when either secret is unset; the .app then
+      # ships the empty dummy and the swap/crosspay flows fail with
+      # the recognizable "Quote Unavailable" message (so the broken
+      # state is loud rather than silently green).
+      - name: Inject PartnerKeys.plist into .app bundle
+        if: env.ZODL_IOS_NEAR_KEY != '' && env.ZODL_IOS_NEAR_FEE_DEPOSIT_ADDRESS != ''
+        env:
+          ZODL_IOS_NEAR_KEY: ${{ secrets.ZODL_IOS_NEAR_KEY }}
+          ZODL_IOS_NEAR_FEE_DEPOSIT_ADDRESS: ${{ secrets.ZODL_IOS_NEAR_FEE_DEPOSIT_ADDRESS }}
+        run: |
+          APP_PLIST=$(ls build/Build/Products/Debug-iphonesimulator/*.app/PartnerKeys.plist 2>/dev/null | head -1)
+          if [ -z "$APP_PLIST" ]; then
+              echo "::error::Could not locate PartnerKeys.plist inside the built .app bundle."
+              echo "build/Build/Products/Debug-iphonesimulator/ contents:"
+              ls -la build/Build/Products/Debug-iphonesimulator/ || true
+              exit 1
+          fi
+          cat > "$APP_PLIST" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>nearKey</key>
+              <string>${ZODL_IOS_NEAR_KEY}</string>
+              <key>nearFeeDepositAddress</key>
+              <string>${ZODL_IOS_NEAR_FEE_DEPOSIT_ADDRESS}</string>
+          </dict>
+          </plist>
+          EOF
+          if ! plutil -lint "$APP_PLIST" >/dev/null 2>&1; then
+              echo "::error::Composed PartnerKeys.plist is not a valid plist."
+              exit 1
+          fi
+          echo "Injected PartnerKeys.plist into $APP_PLIST ($(wc -c <"$APP_PLIST") bytes, 2 keys)"
+
+      - name: Upload .app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: zodl-internal-app
+          # We could zip just the .app, but the entire Products dir is small
+          # enough and keeping the bundle structure means the phase job can
+          # `simctl install` it directly without unzipping a separate step.
+          path: build/Build/Products/Debug-iphonesimulator/*.app
+          retention-days: 1
+          if-no-files-found: error
+
+  e2e-ios:
+    needs: build
+    # Same draft-PR guard as `build` — keep it explicit on the expensive job.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: macos-26
+    # Cold-cache phase 2 runs spend ~25-30 min on the
+    # restore-existing-wallet sync alone (chain-tip catchup from the
+    # birthday height on the iOS sim — no inter-run cache like the
+    # Android wrapper has via ~/.zodl-qa/cache). After sync we still
+    # need ~30 min for the 7 tx + verification flows that follow.
+    # 75 min covers cold cases; warm-cache runs (when we add that)
+    # will land well under.
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    strategy:
+      # Run the two suite phases in parallel jobs to halve wall time.
+      # Each job boots its own sim; phase 1 uses fresh wallets, phase 2
+      # restores once and runs cache-dependent tests.
+      fail-fast: false
+      matrix:
+        phase: [1, 2]
+    name: e2e-ios (phase ${{ matrix.phase }})
+    steps:
+      - name: Select latest Xcode
+        run: |
+          LATEST=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$LATEST" ]; then
+            sudo xcode-select -s "$LATEST/Contents/Developer"
+          fi
+          xcodebuild -version
+
+      - name: Checkout smoke tests
+        uses: actions/checkout@v4
+        with:
+          repository: zodl-inc/zodl-qa
+          path: zodl-qa
+          token: ${{ secrets.ZODL_QA }}
+
+      - name: Download .app bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: zodl-internal-app
+          path: app-bundle
+
+      - name: Boot simulator and install app
+        run: |
+          xcrun simctl boot "iPhone 17 Pro" || true
+          xcrun simctl bootstatus "iPhone 17 Pro" -b
+
+          # On CI the simulator defaults to "Connect Hardware Keyboard",
+          # which hides the software keyboard and causes XCUITest typeText
+          # to silently no-op (maestro reports inputText "completed" but
+          # nothing lands in the fields). Force-disable it.
+          defaults write com.apple.iphonesimulator ConnectHardwareKeyboard 0
+          defaults write com.apple.iphonesimulator AutomaticallyShowSoftKeyboard 1
+
+          # download-artifact strips the .app extension when path contains
+          # multiple files inside; restore it by detecting the bundle dir.
+          shopt -s nullglob
+          APPS=(app-bundle/*.app app-bundle)
+          # The artifact uploads the bundle's contents under app-bundle/.
+          # Prefer an actual .app sibling if present, otherwise treat the
+          # download dir itself as the bundle root after renaming.
+          if [ -d app-bundle/Info.plist -o -f app-bundle/Info.plist ]; then
+              mv app-bundle zodl-internal.app
+              APP="zodl-internal.app"
+          else
+              APP=$(ls -d app-bundle/*.app 2>/dev/null | head -1)
+          fi
+          if [ -z "$APP" ]; then
+              echo "Could not find .app bundle after download. Contents:"
+              find app-bundle -maxdepth 2
+              exit 1
+          fi
+          echo "Installing $APP"
+          xcrun simctl install booted "$APP"
+
+          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")
+          echo "Bundle ID: $BUNDLE_ID"
+          xcrun simctl listapps booted | grep -q "\"$BUNDLE_ID\"" \
+              || { echo "App $BUNDLE_ID not installed after simctl install"; exit 1; }
+
+      - name: Install Maestro
+        run: |
+          curl -Ls "https://get.maestro.mobile.dev" | bash
+          echo "$HOME/.maestro/bin" >> $GITHUB_PATH
+
+      # Foundry / cast + zbar / zbarimg — installed via brew. Foundry
+      # provides `cast` for the Layer-2b on-chain USDC transfer; zbar
+      # provides `zbarimg` for QR decode (on-screen deposit-address
+      # text is truncated, and `simctl pbpaste` reads on a cold sim
+      # are unreliable, so the QR is the only robust surface).
+      #
+      # Why not foundry-rs/foundry-toolchain@v1: the action's
+      # foundryup runs an unauthenticated curl against
+      # api.github.com/repos/foundry-rs/foundry/releases/latest, and
+      # the macos-26 runner pool's egress IP regularly hits 403 from
+      # GitHub's rate limit. Even with GITHUB_TOKEN passed via env,
+      # the action's cached SHA doesn't always forward it to the
+      # underlying script. brew installs from its own bottle mirror
+      # with no GitHub API hop, which sidesteps the issue entirely.
+      - name: Install Foundry + zbar
+        run: brew install foundry zbar
+
+      # Warm-cache the iOS SDK DB across CI runs. The wrapper pushes
+      # this DB into the booted sim's app Documents/ before maestro
+      # runs; the Zcash SDK then warm-resumes from the cached scan
+      # state instead of replaying the full birthday-to-tip span
+      # (~25 min cold). Restore is best-effort — first run after this
+      # lands, plus runs after a key invalidation, fall back to cold
+      # scan and re-seed the cache on save.
+      #
+      # Only phase 2 participates: phase 1 uses random create-new-
+      # wallet seeds whose DB scan state would poison the next run's
+      # deterministic-seed warm-resume. The wrapper itself also
+      # short-circuits its cache-save block when ZODL_TEST_PHASE=1.
+      #
+      # Key is per-run-id so each successful run produces a fresh
+      # cache entry; restore-keys falls back to the most recent
+      # matching prefix.
+      #
+      # Prefix bumped v1 → v2 (2026-06-16) to invalidate existing
+      # caches. A stale v1 cache from a past run had scanned_tip at
+      # chain tip but left an unscanned range covering the wallet's
+      # spend transactions — wallet reported 0.39 ZEC total / 0
+      # spendable while the actual on-chain balance was ~0.1 ZEC.
+      # The zodl-qa verifier now also requires unscanned_ranges == 0
+      # (was OR-gated, masking this exact failure mode).
+      - name: Restore Zcash SDK DB cache
+        if: ${{ matrix.phase == 2 }}
+        uses: actions/cache/restore@v5
+        with:
+          path: ~/.zodl-qa/cache
+          key: ${{ runner.os }}-${{ runner.arch }}-zodl-qa-ios-sdk-db-v2-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-zodl-qa-ios-sdk-db-v2-
+
+      - name: Run smoke tests
+        env:
+          # 600s (was 300s). The first XCTest driver init on a cold
+          # sim regularly bumps against the lower bound; bumping gives
+          # headroom without masking real hangs (test still fails after
+          # 10 min instead of 5).
+          MAESTRO_DRIVER_STARTUP_TIMEOUT: 600000
+          ZODL_TEST_SEED_ANDROID: ${{ secrets.ZODL_TEST_SEED_ANDROID }}
+          ZODL_TEST_BIRTHDAY_ANDROID: ${{ secrets.ZODL_TEST_BIRTHDAY_ANDROID }}
+          ZODL_TEST_ADDRESS_ANDROID: ${{ secrets.ZODL_TEST_ADDRESS_ANDROID }}
+          ZODL_TEST_CONTACT_NAME_ANDROID: ${{ vars.ZODL_TEST_CONTACT_NAME_ANDROID || 'Android Shield' }}
+          ZODL_TEST_SEED_IOS: ${{ secrets.ZODL_TEST_SEED_IOS }}
+          ZODL_TEST_BIRTHDAY_IOS: ${{ secrets.ZODL_TEST_BIRTHDAY_IOS }}
+          ZODL_TEST_ADDRESS_IOS: ${{ secrets.ZODL_TEST_ADDRESS_IOS }}
+          ZODL_TEST_CONTACT_NAME_IOS: ${{ vars.ZODL_TEST_CONTACT_NAME_IOS || 'iOS Shield' }}
+          ZODL_TEST_DIRECTION: ${{ vars.ZODL_TEST_DIRECTION || 'AUTO_ALTERNATE' }}
+          ZODL_TEST_PHASE: ${{ matrix.phase }}
+          ZODL_TEST_SEND_AMOUNT: ${{ vars.ZODL_TEST_SEND_AMOUNT || '0.001' }}
+          ZODL_TEST_BALANCE_MIN: ${{ vars.ZODL_TEST_BALANCE_MIN || '1.3' }}
+          ZODL_TEST_BALANCE_WARN: ${{ vars.ZODL_TEST_BALANCE_WARN || '1.36' }}
+          ZODL_TEST_CROSSPAY_TARGET_ADDRESS: ${{ vars.ZODL_TEST_CROSSPAY_TARGET_ADDRESS || '0xf90bd7c30fd538efde8729ea61fdf20920ed3171' }}
+          ZODL_TEST_CROSSPAY_TARGET_NAME: ${{ vars.ZODL_TEST_CROSSPAY_TARGET_NAME || 'USDC Base' }}
+          ZODL_TEST_CROSSPAY_CHAIN: ${{ vars.ZODL_TEST_CROSSPAY_CHAIN || 'BASE' }}
+          ZODL_TEST_CROSSPAY_USDC_AMOUNT: ${{ vars.ZODL_TEST_CROSSPAY_USDC_AMOUNT || '0.5' }}
+          ZODL_TEST_SWAP_ZEC_AMOUNT: ${{ vars.ZODL_TEST_SWAP_ZEC_AMOUNT || '0.005' }}
+          ZODL_TEST_SWAP_RECV_USDC_AMOUNT: ${{ vars.ZODL_TEST_SWAP_RECV_USDC_AMOUNT || '2.3' }}
+          # Layer-2b: the wrapper auto-funds the reverse-swap deposit
+          # address (USDC on Base) after swap-receive-usdc-to-zec.yaml
+          # runs whenever ZODL_USDC_BASE_PRIVKEY is set. Same model
+          # as the other tx tests in the suite — they spend real
+          # mainnet funds whenever their respective secrets/seeds
+          # are present. Each fire = ~$2.30 USDC + ~$0.05 ETH gas
+          # from the counterparty wallet. NEAR 1Click JWT is
+          # auto-extracted by the wrapper from the in-checkout
+          # PartnerKeys.plist (FDroid reproducible-build constraint
+          # on Android keeps it in source; iOS uses the plist), so
+          # no JWT secret is required — kept here as an override
+          # hatch only.
+          ZODL_USDC_BASE_PRIVKEY: ${{ secrets.ZODL_USDC_BASE_PRIVKEY }}
+          ZODL_NEAR_1CLICK_JWT: ${{ secrets.ZODL_NEAR_1CLICK_JWT }}
+          # Phase 2 verifies arrival via activity-accuracy at the
+          # suite tail rather than blocking on the 10-min 1Click poll.
+          ZODL_LAYER_2B_POLL: ${{ vars.ZODL_LAYER_2B_POLL || '0' }}
+          ZODL_TEST_STATE_DIR: ${{ github.workspace }}/.zodl-qa-state
+        run: |
+          chmod +x zodl-qa/scripts/run-smoke-ios.sh
+          ./zodl-qa/scripts/run-smoke-ios.sh
+
+      # Persist the SDK DB regardless of test outcome — partial sync
+      # progress is still useful for the next run's warm-resume. If
+      # the job is hard-killed by the 75-min timeout the save won't
+      # fire, but the prior run's cache entry stays in the pool and
+      # restore-keys will pick it up next time.
+      - name: Save Zcash SDK DB cache
+        if: ${{ always() && matrix.phase == 2 }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: ~/.zodl-qa/cache
+          key: ${{ runner.os }}-${{ runner.arch }}-zodl-qa-ios-sdk-db-v2-${{ github.run_id }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maestro-ios-results-phase-${{ matrix.phase }}
+          path: ~/.maestro/tests/

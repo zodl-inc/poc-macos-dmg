@@ -1,0 +1,114 @@
+name: Pull Request
+
+on:
+  pull_request:
+    # Include ready_for_review so flipping a draft PR to "Ready for review"
+    # re-triggers CI. The default activity types are opened/synchronize/
+    # reopened only, so without this the draft-skipped job below would never
+    # run until the next push.
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - '.github/ISSUE_TEMPLATE/*'
+      - '.github/pull_request_template.md'
+      - 'LICENSE'
+      - 'README.md'
+      - 'docs/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FX_ENABLE_GLASS: "0"
+  DERIVED_DATA_PATH: .ci/DerivedData
+  SOURCE_PACKAGES_PATH: .ci/DerivedData/SourcePackages
+
+jobs:
+  unit_tests:
+    # Skip draft PRs — no tests run until a PR is marked ready for review
+    # (matches the e2e/smoke suite guard in e2e-smoke.yml).
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select latest Xcode
+        # macos-26 runners ship multiple Xcodes; default-selected is 16.x
+        # (Swift 6.0). The project is SWIFT_VERSION=6.0, and Swift 6.0 treats
+        # some concurrency diagnostics as errors that 6.2+ relaxed back to
+        # warnings ("Approachable Concurrency"). Without this step CI fails
+        # on call sites that compile fine in newer Xcode locally. Pin to the
+        # newest Xcode the runner has so the compiler matches local builds.
+        run: |
+          LATEST=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$LATEST" ]; then
+            echo "Selecting $LATEST"
+            sudo xcode-select -s "$LATEST/Contents/Developer"
+          fi
+          xcodebuild -version
+
+      - name: Compute Xcode cache key
+        id: xcode-cache-key
+        run: |
+          xcodebuild -version
+          xcodebuild -version | shasum -a 256 | awk '{ print "hash="$1 }' >> "$GITHUB_OUTPUT"
+
+      - name: Restore Swift package cache
+        id: spm-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ env.SOURCE_PACKAGES_PATH }}
+          key: ${{ runner.os }}-${{ runner.arch }}-xcode-spm-${{ steps.xcode-cache-key.outputs.hash }}-${{ hashFiles('secant.xcodeproj/project.pbxproj', 'secant.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-xcode-spm-${{ steps.xcode-cache-key.outputs.hash }}-
+            ${{ runner.os }}-${{ runner.arch }}-xcode-spm-
+
+      - name: Resolve packages
+        run: |
+          xcodebuild -project secant.xcodeproj \
+            -scheme zodl-internal \
+            -resolvePackageDependencies \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_PATH"
+
+      - name: Save Swift package cache
+        if: ${{ steps.spm-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ env.SOURCE_PACKAGES_PATH }}
+          key: ${{ steps.spm-cache.outputs.cache-primary-key }}
+
+      - name: Run unit tests
+        run: |
+          set -o pipefail
+          # Use xcbeautify, not xcpretty: xcpretty does not understand Swift
+          # Testing output and silently drops it, so a failing `@Test` never
+          # shows up in the log (only the XCTest subset does). Pre-installed on
+          # the macos runner image; guard-install just in case it ever isn't.
+          command -v xcbeautify >/dev/null 2>&1 || brew install xcbeautify
+          xcodebuild test \
+            -project secant.xcodeproj \
+            -scheme zodl-internal \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=latest' \
+            -resultBundlePath TestResults.xcresult \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_PATH" \
+            -only-testing:zodlTests \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            DEBUG_INFORMATION_FORMAT=dwarf \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcbeautify
+
+      - name: Upload test results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: TestResults
+          path: TestResults.xcresult
