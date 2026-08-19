@@ -20,15 +20,27 @@ jobs:
       # GHA restricts checkouts to within the workspace — clone inside, then symlink.
       # Pinned to sdk main @ 785c7618 which includes SlipstreamSynchronizer.
       # fetch-depth: 0 needed for SHA checkout; main works since 785c7618 is on main.
-      # macos-revival uses XCLocalSwiftPackageReference "../zcash-swift-wallet-sdk"
-      # (repo name, not ZcashLightClientKit). Cloning to that exact path makes it resolve.
+      # macos-revival uses XCLocalSwiftPackageReference "../zcash-swift-wallet-sdk".
+      # The runner workspace is /Users/runner/work/poc-macos-dmg/ and the app is
+      # checked out to the inner poc-macos-dmg/ subdirectory. The pbxproj resolves
+      # "../zcash-swift-wallet-sdk" relative to the project root, which means
+      # /Users/runner/work/poc-macos-dmg/zcash-swift-wallet-sdk (one level up from app dir).
+      # GHA requires checkouts inside GITHUB_WORKSPACE, so we clone inside then symlink up.
       - name: Checkout zcash-swift-wallet-sdk
         uses: actions/checkout@v4
         with:
           repository: zodl-inc/zcash-swift-wallet-sdk
           ref: main
-          path: zcash-swift-wallet-sdk
+          path: zcash-swift-wallet-sdk-src
           fetch-depth: 1
+
+      - name: Symlink SDK as sibling of app directory
+        run: |
+          # GITHUB_WORKSPACE = /Users/runner/work/poc-macos-dmg/poc-macos-dmg
+          # pbxproj looks for  /Users/runner/work/poc-macos-dmg/zcash-swift-wallet-sdk
+          PARENT=$(dirname "$GITHUB_WORKSPACE")
+          ln -s "$GITHUB_WORKSPACE/zcash-swift-wallet-sdk-src" "$PARENT/zcash-swift-wallet-sdk"
+          ls "$PARENT/zcash-swift-wallet-sdk/Package.swift" && echo "SDK symlink OK"
 
       - name: Set version from tag
         run: |
