@@ -40,6 +40,40 @@ jobs:
           ln -s "$GITHUB_WORKSPACE/zcash-swift-wallet-sdk-src" "$PARENT/zcash-swift-wallet-sdk"
           ls "$PARENT/zcash-swift-wallet-sdk/Package.swift" && echo "SDK symlink OK"
 
+      # The upstream 2.8.0-rc.2 binary doesn't have zodl-inc voting symbols.
+      # Build the FFI from source so the custom zcashlc_voting_* functions are present.
+      - name: Authorize cargo for slipstream (zodl-inc private Rust crate)
+        uses: ./.github/actions/authorize-slipstream
+        with:
+          app-id: ${{ secrets.CARGO_PRIVATE_APP_ID }}
+          app-private-key: ${{ secrets.CARGO_PRIVATE_APP_KEY }}
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/zcash-swift-wallet-sdk-src/target
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+          key: ${{ runner.os }}-cargo-ffi-${{ hashFiles('zcash-swift-wallet-sdk-src/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-ffi-
+
+      - name: Build macOS FFI (libzcashlc.xcframework)
+        working-directory: zcash-swift-wallet-sdk-src
+        run: make ffi-macos
+
+      - name: Point SDK Package.swift at locally built FFI
+        working-directory: zcash-swift-wallet-sdk-src
+        run: make configure-local-ffi
+
       - name: Set version from tag
         run: |
           VERSION="${GITHUB_REF_NAME#mac-v}"
