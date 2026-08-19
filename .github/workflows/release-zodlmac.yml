@@ -17,6 +17,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: 3da11274
+          fetch-depth: 0
 
       # The project uses XCLocalSwiftPackageReference "../ZcashLightClientKit".
       # GHA restricts checkouts to within the workspace — clone inside, then symlink.
