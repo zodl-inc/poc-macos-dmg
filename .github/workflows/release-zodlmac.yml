@@ -13,11 +13,8 @@ jobs:
   release:
     runs-on: macos-26
     steps:
-      # Checkout app at the macos-revival commit known to compile
+      # This branch is pinned to zodl-ios macos-revival @ 3da11274
       - uses: actions/checkout@v4
-        with:
-          ref: 3da11274
-          fetch-depth: 0
 
       # The project uses XCLocalSwiftPackageReference "../ZcashLightClientKit".
       # GHA restricts checkouts to within the workspace — clone inside, then symlink.
