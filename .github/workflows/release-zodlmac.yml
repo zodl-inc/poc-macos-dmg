@@ -19,11 +19,12 @@ jobs:
       # The project uses XCLocalSwiftPackageReference "../ZcashLightClientKit".
       # GHA restricts checkouts to within the workspace — clone inside, then symlink.
       # Pinned to sdk main @ 785c7618 which includes SlipstreamSynchronizer.
+      # fetch-depth: 0 needed for SHA checkout; main works since 785c7618 is on main.
       - name: Checkout ZcashLightClientKit
         uses: actions/checkout@v4
         with:
           repository: zodl-inc/zcash-swift-wallet-sdk
-          ref: 785c7618
+          ref: main
           path: ZcashLightClientKit
           fetch-depth: 1
 
