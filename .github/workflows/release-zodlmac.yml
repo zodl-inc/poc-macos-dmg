@@ -20,21 +20,15 @@ jobs:
       # GHA restricts checkouts to within the workspace — clone inside, then symlink.
       # Pinned to sdk main @ 785c7618 which includes SlipstreamSynchronizer.
       # fetch-depth: 0 needed for SHA checkout; main works since 785c7618 is on main.
-      - name: Checkout ZcashLightClientKit
+      # macos-revival uses XCLocalSwiftPackageReference "../zcash-swift-wallet-sdk"
+      # (repo name, not ZcashLightClientKit). Cloning to that exact path makes it resolve.
+      - name: Checkout zcash-swift-wallet-sdk
         uses: actions/checkout@v4
         with:
           repository: zodl-inc/zcash-swift-wallet-sdk
           ref: main
-          path: ZcashLightClientKit
+          path: zcash-swift-wallet-sdk
           fetch-depth: 1
-
-      # The pbxproj uses XCLocalSwiftPackageReference "../ZcashLightClientKit".
-      # actions/checkout puts the app at $GITHUB_WORKSPACE/poc-macos-dmg/,
-      # so "../ZcashLightClientKit" resolves to $GITHUB_WORKSPACE/ZcashLightClientKit
-      # which is exactly where we cloned the SDK — no symlink needed.
-      # Verify the path is correct before archiving:
-      - name: Verify SDK path
-        run: ls "$GITHUB_WORKSPACE/ZcashLightClientKit/Package.swift"
 
       - name: Set version from tag
         run: |
