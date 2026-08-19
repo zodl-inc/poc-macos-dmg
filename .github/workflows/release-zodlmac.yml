@@ -28,8 +28,13 @@ jobs:
           path: ZcashLightClientKit
           fetch-depth: 1
 
-      - name: Symlink SDK as sibling (../ZcashLightClientKit)
-        run: ln -s "$GITHUB_WORKSPACE/ZcashLightClientKit" "$GITHUB_WORKSPACE/../ZcashLightClientKit"
+      # The pbxproj uses XCLocalSwiftPackageReference "../ZcashLightClientKit".
+      # actions/checkout puts the app at $GITHUB_WORKSPACE/poc-macos-dmg/,
+      # so "../ZcashLightClientKit" resolves to $GITHUB_WORKSPACE/ZcashLightClientKit
+      # which is exactly where we cloned the SDK — no symlink needed.
+      # Verify the path is correct before archiving:
+      - name: Verify SDK path
+        run: ls "$GITHUB_WORKSPACE/ZcashLightClientKit/Package.swift"
 
       - name: Set version from tag
         run: |
