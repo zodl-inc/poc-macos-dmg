@@ -35,8 +35,8 @@ private let pinnedSPKIHashes: Set<String> = [
 ]
 
 final class PinningDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
-    let log: (String) -> Void
-    init(log: @escaping (String) -> Void) { self.log = log }
+    let log: @Sendable (String) -> Void
+    init(log: @escaping @Sendable (String) -> Void) { self.log = log }
 
     func urlSession(_ session: URLSession,
                     didReceive challenge: URLAuthenticationChallenge,
@@ -128,7 +128,7 @@ class Updater {
     static let currentVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as! String
     static let teamID = "RLPRR8CPQG"
 
-    static func checkAndUpdate(log: @escaping (String) -> Void) {
+    static func checkAndUpdate(log: @escaping @Sendable (String) -> Void) {
         log("🔍 Checking for updates (current: v\(currentVersion))...")
         let delegate = PinningDelegate(log: log)
         let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
@@ -192,7 +192,7 @@ class Updater {
         }.resume()
     }
 
-    private static func verifyEd25519(data: Data, signatureB64: String, log: (String) -> Void) -> Bool {
+    private static func verifyEd25519(data: Data, signatureB64: String, log: @Sendable (String) -> Void) -> Bool {
         // CryptoKit Curve25519 (Ed25519) — strip the 12-byte DER header to get the raw 32-byte key
         guard let pubKeyDER = Data(base64Encoded: updatePublicKeyB64),
               pubKeyDER.count == 44,
@@ -216,7 +216,7 @@ class Updater {
     private static func downloadAndInstall(dmgURL: URL, sha256URL: URL, sigURL: URL,
                                             version: String,
                                             session: URLSession,
-                                            log: @escaping (String) -> Void) {
+                                            log: @escaping @Sendable (String) -> Void) {
         let dmgDest = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("HelloWorld-\(version).dmg")
 
