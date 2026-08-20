@@ -79,7 +79,7 @@ struct zodlmac_internalApp: App {
                 MacMenuSimplifier.simplifyDeferred()
                 // Check for updates 3s after launch
                 DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
-                    Updater.checkAndUpdate(log: { msg in print("[Updater] \(msg)") })
+                    AutoUpdater.checkAndUpdate(log: { msg in print("[Updater] \(msg)") })
                 }
             }
             .onChange(of: scenePhase) { _, newPhase in
@@ -94,7 +94,7 @@ struct zodlmac_internalApp: App {
                         rootStore.send(.initialization(.appDelegate(.willEnterForeground)))
                         // Also check for updates on foreground
                         DispatchQueue.global().async {
-                            Updater.checkAndUpdate(log: { msg in print("[Updater] \(msg)") })
+                            AutoUpdater.checkAndUpdate(log: { msg in print("[Updater] \(msg)") })
                         }
                     }
                 case .background:
