@@ -68,6 +68,30 @@ jobs:
         working-directory: zcash-swift-wallet-sdk-src
         run: make ffi-macos
 
+      - name: Convert libzcashlc.framework to versioned bundle (macOS requires this)
+        run: |
+          # The BuildSupport Makefile builds a shallow (iOS-style) bundle as a
+          # workaround for Xcode 15.3 (see ECC issue #1166). macOS archiving
+          # rejects shallow bundles. Convert to the required versioned layout.
+          FW="$GITHUB_WORKSPACE/zcash-swift-wallet-sdk-src/BuildSupport/products/libzcashlc.xcframework/macos-arm64_x86_64/libzcashlc.framework"
+          if [ ! -d "$FW/Versions" ]; then
+            mkdir -p "$FW/Versions/A/Resources"
+            # Move binary and headers into the versioned slot
+            mv "$FW/libzcashlc"        "$FW/Versions/A/libzcashlc"
+            mv "$FW/Headers"           "$FW/Versions/A/Headers"
+            mv "$FW/Modules"           "$FW/Versions/A/Modules"
+            mv "$FW/Info.plist"        "$FW/Versions/A/Resources/Info.plist"
+            # Create Current symlink and top-level symlinks
+            ln -s A                         "$FW/Versions/Current"
+            ln -s Versions/Current/libzcashlc  "$FW/libzcashlc"
+            ln -s Versions/Current/Headers     "$FW/Headers"
+            ln -s Versions/Current/Modules     "$FW/Modules"
+            ln -s Versions/Current/Resources   "$FW/Resources"
+            echo "✅ Converted libzcashlc.framework to versioned bundle"
+          else
+            echo "ℹ️ Already versioned — skipping"
+          fi
+
       - name: Point SDK Package.swift at locally built FFI
         working-directory: zcash-swift-wallet-sdk-src
         run: make configure-local-ffi
