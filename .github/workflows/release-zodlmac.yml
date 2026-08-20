@@ -193,7 +193,7 @@ jobs:
 
       - name: Build DMG
         run: |
-          APP="build/export/Zodl.app"
+          APP="build/export/Zodl Internal.app"
           DMG_STAGING="build/dmg-staging"
           mkdir -p "$DMG_STAGING"
           cp -R "$APP" "$DMG_STAGING/"
