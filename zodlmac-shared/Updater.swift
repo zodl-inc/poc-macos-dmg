@@ -34,7 +34,7 @@ private let pinnedSPKIHashes: Set<String> = [
     "EdsvlytFf4a/O+hCPwBXFFi46RKXqivCAF+mO7s+5Ng=", // Sectigo Public Server Authentication Root E46
 ]
 
-class PinningDelegate: NSObject, URLSessionDelegate {
+final class PinningDelegate: NSObject, URLSessionDelegate, @unchecked Sendable {
     let log: (String) -> Void
     init(log: @escaping (String) -> Void) { self.log = log }
 
