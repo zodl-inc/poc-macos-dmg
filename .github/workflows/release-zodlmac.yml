@@ -43,10 +43,8 @@ jobs:
       # The upstream 2.8.0-rc.2 binary doesn't have zodl-inc voting symbols.
       # Build the FFI from source so the custom zcashlc_voting_* functions are present.
       - name: Authorize cargo for slipstream (zodl-inc private Rust crate)
-        uses: ./.github/actions/authorize-slipstream
-        with:
-          app-id: ${{ secrets.CARGO_PRIVATE_APP_ID }}
-          app-private-key: ${{ secrets.CARGO_PRIVATE_APP_KEY }}
+        run: |
+          git config --global url."https://x-access-token:${{ secrets.SLIPSTREAM_PAT }}@github.com/zodl-inc/slipstream-internal".insteadOf "https://github.com/zodl-inc/slipstream-internal"
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@v1
