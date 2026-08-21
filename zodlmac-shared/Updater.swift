@@ -218,7 +218,7 @@ class Updater {
                                             session: URLSession,
                                             log: @escaping @Sendable (String) -> Void) {
         let dmgDest = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("HelloWorld-\(version).dmg")
+            .appendingPathComponent("Zodl Internal-\(version).dmg")
 
         log("📥 Fetching checksum + signature...")
         guard let sha256Data = try? Data(contentsOf: sha256URL),
@@ -284,7 +284,7 @@ class Updater {
             log("📂 Mounted at \(mountPoint)")
 
             // Sanity check: verify the mounted app is actually the new version
-            let mountedPlist = "\(mountPoint)/HelloWorld.app/Contents/Info.plist"
+            let mountedPlist = "\(mountPoint)/Zodl Internal.app/Contents/Info.plist"
             let mountedVersion = runOutput("/usr/bin/defaults",
                 ["read", mountedPlist, "CFBundleShortVersionString"])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -310,7 +310,7 @@ class Updater {
             run("/bin/sh", ["-c", "rm -rf '\(destAppNew)'"])
 
             let cpResult = run("/bin/sh", ["-c",
-                "cp -R '\(mountPoint)/HelloWorld.app' '\(destAppNew)'"
+                "cp -R '\(mountPoint)/Zodl Internal.app' '\(destAppNew)'"
             ])
             log("  cp to temp: exit \(cpResult)")
 
