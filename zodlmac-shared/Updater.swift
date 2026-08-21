@@ -124,7 +124,7 @@ private let updatePublicKeyB64 = "MCowBQYDK2VwAyEA9aT3lXqgqgD2NyCH7S7nJ7MANFPOb9
 // MARK: - Updater
 
 class Updater {
-    static let repoAPI = "https://api.github.com/repos/zodl-inc/poc-macos-dmg/releases/latest"
+    static let repoAPI = "https://api.github.com/repos/zodl-inc/poc-macos-dmg-test/releases/latest"
     static let currentVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as! String
     static let teamID = "RLPRR8CPQG"
 
