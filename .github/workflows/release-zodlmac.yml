@@ -109,7 +109,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: arn:aws:iam::907793002116:role/poc-macos-dmg-gha
+          role-to-assume: ${{ secrets.GHA_ROLE_ARN }}
           aws-region: us-east-1
 
       - name: Import Developer ID certificate + notarization creds
