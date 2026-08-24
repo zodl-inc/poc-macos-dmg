@@ -186,9 +186,11 @@ class Updater {
                 alert.addButton(withTitle: "Not Now")
                 alert.alertStyle = .informational
                 if alert.runModal() == .alertFirstButtonReturn {
-                    downloadAndInstall(dmgURL: dmgURL, sha256URL: sha256URL,
-                                       sigURL: sigURL, version: latest,
-                                       session: session, log: log)
+                    DispatchQueue.global().async {
+                        downloadAndInstall(dmgURL: dmgURL, sha256URL: sha256URL,
+                                           sigURL: sigURL, version: latest,
+                                           session: session, log: log)
+                    }
                 }
             }
         }.resume()
