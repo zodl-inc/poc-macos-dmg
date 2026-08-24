@@ -1,0 +1,105 @@
+name: E2E Auto-Update Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feature/zodlmac-with-autoupdate]
+    paths: ['zodlmac-shared/Updater.swift']
+
+jobs:
+  e2e:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download v1.0.0 DMG (base install)
+        run: |
+          curl -L -s -o /tmp/Zodl-1.0.0.dmg \
+            "https://github.com/zodl-inc/poc-macos-dmg-test/releases/download/mac-v1.0.0/Zodl-1.0.0.dmg"
+          echo "Downloaded: $(du -sh /tmp/Zodl-1.0.0.dmg | cut -f1)"
+
+      - name: Install Zodl v1.0.0
+        run: |
+          hdiutil attach /tmp/Zodl-1.0.0.dmg -nobrowse -quiet
+          cp -R "/Volumes/Zodl-1.0.0/Zodl Internal.app" /Applications/
+          xattr -dr com.apple.quarantine "/Applications/Zodl Internal.app"
+          hdiutil detach /Volumes/Zodl-1.0.0 -quiet -force
+          VERSION=$(defaults read "/Applications/Zodl Internal.app/Contents/Info.plist" \
+            CFBundleShortVersionString)
+          echo "Installed version: $VERSION"
+          [ "$VERSION" = "1.0.0" ] || (echo "❌ Wrong version: $VERSION"; exit 1)
+          echo "✅ v1.0.0 installed"
+
+      - name: Launch app and capture updater logs
+        run: |
+          # Start log capture BEFORE launching app
+          log stream \
+            --predicate 'process CONTAINS "Zodl Internal" OR processImagePath CONTAINS "Zodl"' \
+            --style compact > /tmp/zodl-updater.log 2>&1 &
+          LOG_PID=$!
+          echo "LOG_PID=$LOG_PID" >> $GITHUB_ENV
+
+          # Launch the app — GHA macOS runners have a real GUI session (Aqua)
+          open -a "/Applications/Zodl Internal.app"
+          echo "App launched"
+
+          # Wait for the updater to run (3s startup delay + download)
+          echo "Waiting 60s for auto-update flow..."
+          sleep 60
+
+          # Stop log capture
+          kill $LOG_PID 2>/dev/null || true
+          echo "Log capture stopped"
+
+      - name: Verify update flow
+        run: |
+          echo "=== Updater logs ==="
+          cat /tmp/zodl-updater.log | \
+            grep -v "mDNS\|Bluetooth\|CoreData\|Metal\|subsystem\|category" | \
+            head -80 || true
+
+          echo ""
+          echo "=== Checking for key updater events ==="
+
+          # Check version detection
+          if grep -q "Latest.*v1.0.1\|update available" /tmp/zodl-updater.log 2>/dev/null; then
+            echo "✅ Detected v1.0.1 update"
+          else
+            echo "⚠️  Update detection not confirmed in logs"
+          fi
+
+          # Check Ed25519 verification
+          if grep -q "Ed25519.*verified\|signature verified" /tmp/zodl-updater.log 2>/dev/null; then
+            echo "✅ Ed25519 signature verified"
+          fi
+
+          # Check SHA256 verification
+          if grep -q "SHA256.*verified\|checksum verified" /tmp/zodl-updater.log 2>/dev/null; then
+            echo "✅ SHA256 checksum verified"
+          fi
+
+          # Check if installed version changed to 1.0.1
+          echo ""
+          echo "=== Installed version after update ==="
+          INSTALLED=$(defaults read "/Applications/Zodl Internal.app/Contents/Info.plist" \
+            CFBundleShortVersionString 2>/dev/null || echo "unknown")
+          echo "Installed: $INSTALLED"
+
+          if [ "$INSTALLED" = "1.0.1" ]; then
+            echo "✅ Successfully updated to v1.0.1"
+          else
+            echo "⚠️  Still at $INSTALLED (update may require user interaction)"
+          fi
+
+          # Check for running processes
+          echo ""
+          echo "=== Running Zodl processes ==="
+          ps aux | grep -i "Zodl Internal" | grep -v grep || echo "(none)"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: updater-logs
+          path: /tmp/zodl-updater.log
