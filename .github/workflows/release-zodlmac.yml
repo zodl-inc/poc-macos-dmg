@@ -100,11 +100,17 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#mac-v}"
           echo "VERSION=$VERSION" >> $GITHUB_ENV
-          /usr/libexec/PlistBuddy -c "Set :MARKETING_VERSION $VERSION" \
-            secant.xcodeproj/project.pbxproj 2>/dev/null || true
-          # Also set in Info.plist for Updater.currentVersion
+          # pbxproj is not a real plist — use sed to update MARKETING_VERSION
+          sed -i '' "s/MARKETING_VERSION = [^;]*/MARKETING_VERSION = $VERSION/g" \
+            secant.xcodeproj/project.pbxproj
+          # Set CFBundleShortVersionString in Info.plist (used by Updater.currentVersion)
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" \
+            zodlmac-internal/Info.plist 2>/dev/null || \
+          /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSION" \
             zodlmac-internal/Info.plist 2>/dev/null || true
+          # Verify
+          grep "MARKETING_VERSION" secant.xcodeproj/project.pbxproj | head -2
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" zodlmac-internal/Info.plist 2>/dev/null
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4

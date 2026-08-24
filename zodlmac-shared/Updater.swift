@@ -235,7 +235,9 @@ class Updater {
         }
         log("🔢 Expected SHA256: \(sha256Line)")
         log("🔏 Verifying Ed25519 signature on checksum...")
-        guard verifyEd25519(data: sha256Data, signatureB64: sigB64Raw, log: log) else {
+        // sign-checksum.py signs the hex string (not the full file bytes)
+        let sha256HexData = Data(sha256Line.utf8)
+        guard verifyEd25519(data: sha256HexData, signatureB64: sigB64Raw, log: log) else {
             log("❌ Ed25519 verification failed — aborting")
             return
         }
