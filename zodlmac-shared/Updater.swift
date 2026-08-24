@@ -155,7 +155,9 @@ class Updater {
                 return
             }
 
-            let latest = release.tag_name.trimmingCharacters(in: CharacterSet(charactersIn: "v"))
+            let latest = release.tag_name
+                .replacingOccurrences(of: "mac-v", with: "")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "v"))
             log("📦 Latest release: v\(latest)")
 
             guard latest.compare(currentVersion, options: .numeric) == .orderedDescending else {
