@@ -33,50 +33,53 @@ jobs:
 
       - name: Launch app and capture updater logs
         run: |
-          # Start log capture BEFORE launching app
+          # Updater uses NSLog("[Updater] ...") → unified log (capturable via log stream)
           log stream \
-            --predicate 'process CONTAINS "Zodl Internal" OR processImagePath CONTAINS "Zodl"' \
+            --predicate 'process CONTAINS "Zodl Internal" AND eventMessage CONTAINS "[Updater]"' \
             --style compact > /tmp/zodl-updater.log 2>&1 &
           LOG_PID=$!
           echo "LOG_PID=$LOG_PID" >> $GITHUB_ENV
 
-          # Launch the app — GHA macOS runners have a real GUI session (Aqua)
           open -a "/Applications/Zodl Internal.app"
           echo "App launched"
+          sleep 2
+          pgrep -x "Zodl Internal" && echo "App running" || echo "App not found in ps"
 
-          # Wait for the updater to run (3s startup delay + download)
-          echo "Waiting 60s for auto-update flow..."
-          sleep 60
+          echo "Waiting 90s for full update flow (3s delay + download + verify + install)..."
+          sleep 90
 
-          # Stop log capture
           kill $LOG_PID 2>/dev/null || true
           echo "Log capture stopped"
 
       - name: Verify update flow
         run: |
-          echo "=== Updater logs ==="
-          cat /tmp/zodl-updater.log | \
-            grep -v "mDNS\|Bluetooth\|CoreData\|Metal\|subsystem\|category" | \
-            head -80 || true
+          echo "=== Updater logs (NSLog → unified log) ==="
+          cat /tmp/zodl-updater.log | grep "\[Updater\]" || \
+            echo "(no [Updater] lines — check log stream predicate)"
 
           echo ""
           echo "=== Checking for key updater events ==="
 
-          # Check version detection
-          if grep -q "Latest.*v1.0.1\|update available" /tmp/zodl-updater.log 2>/dev/null; then
+          if grep -q "Latest.*1\.0\.1\|update available\|Update available" /tmp/zodl-updater.log 2>/dev/null; then
             echo "✅ Detected v1.0.1 update"
           else
             echo "⚠️  Update detection not confirmed in logs"
           fi
 
-          # Check Ed25519 verification
           if grep -q "Ed25519.*verified\|signature verified" /tmp/zodl-updater.log 2>/dev/null; then
             echo "✅ Ed25519 signature verified"
           fi
 
-          # Check SHA256 verification
-          if grep -q "SHA256.*verified\|checksum verified" /tmp/zodl-updater.log 2>/dev/null; then
+          if grep -q "SHA256.*verified" /tmp/zodl-updater.log 2>/dev/null; then
             echo "✅ SHA256 checksum verified"
+          fi
+
+          if grep -q "Install complete\|installed to\|mv .new → current" /tmp/zodl-updater.log 2>/dev/null; then
+            echo "✅ Install completed"
+          fi
+
+          if grep -q "Helper launched\|Launching.*helper\|app will close" /tmp/zodl-updater.log 2>/dev/null; then
+            echo "✅ Relaunch helper launched"
           fi
 
           # Check if installed version changed to 1.0.1
