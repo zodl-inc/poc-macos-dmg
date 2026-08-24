@@ -45,7 +45,38 @@ jobs:
           sleep 2
           pgrep -x "Zodl Internal" && echo "App running" || echo "App not found in ps"
 
-          echo "Waiting 90s for full update flow (3s delay + download + verify + install)..."
+          # Wait for the NSAlert dialog to appear (3s startup delay)
+          echo "Waiting 6s for NSAlert to appear..."
+          sleep 6
+
+          # Click "Install & Relaunch" via osascript (AppleScript UI automation)
+          echo "Clicking Install & Relaunch button..."
+          osascript << 'APPLESCRIPT' || true
+            tell application "System Events"
+              repeat 5 times
+                if exists (button "Install & Relaunch" of sheet 1 of window 1 of process "Zodl Internal") then
+                  click button "Install & Relaunch" of sheet 1 of window 1 of process "Zodl Internal"
+                  return "clicked sheet"
+                end if
+                if exists (button "Install & Relaunch" of window 1 of process "Zodl Internal") then
+                  click button "Install & Relaunch" of window 1 of process "Zodl Internal"
+                  return "clicked window"
+                end if
+                -- NSAlert may appear as its own window
+                repeat with w in windows of process "Zodl Internal"
+                  if exists (button "Install & Relaunch" of w) then
+                    click button "Install & Relaunch" of w
+                    return "clicked"
+                  end if
+                end repeat
+                delay 1
+              end repeat
+              return "button not found"
+            end tell
+APPLESCRIPT
+          echo "osascript done"
+
+          echo "Waiting 90s for download + verify + install + relaunch..."
           sleep 90
 
           kill $LOG_PID 2>/dev/null || true
