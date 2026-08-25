@@ -34,6 +34,10 @@ struct zodlmac_internalApp: App {
         // the split view had already restored the stale width on frame 1 — so launch showed
         // remembered-width → slam-to-240, the visible sidebar pop.
         MacSidebarDefaults.purgeRememberedWidths()
+        // Check for updates at launch — runs regardless of wallet onboarding state
+        DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
+            Updater.checkAndUpdate(log: { msg in NSLog("[Updater] %@", msg) })
+        }
     }
 
     var body: some Scene {
