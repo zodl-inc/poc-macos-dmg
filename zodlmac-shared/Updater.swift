@@ -129,15 +129,19 @@ class Updater {
     static let teamID = "RLPRR8CPQG"
 
     // Retained strongly so the session + delegate survive past runModal()
-    nonisolated(unsafe) private static var _activeSession: URLSession?
-    nonisolated(unsafe) private static var _activeDelegate: PinningDelegate?
+    // Wrapped in a class to avoid Swift concurrency static var warnings
+    private static let _holder = UpdaterHolder()
+    private class UpdaterHolder {
+        var session: URLSession?
+        var delegate: PinningDelegate?
+    }
 
     static func checkAndUpdate(log: @escaping @Sendable (String) -> Void) {
         log("🔍 Checking for updates (current: v\(currentVersion))...")
         let delegate = PinningDelegate(log: log)
         let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
-        _activeDelegate = delegate
-        _activeSession = session
+        _holder.delegate = delegate
+        _holder.session = session
 
         guard let url = URL(string: repoAPI) else { return }
         var req = URLRequest(url: url)
