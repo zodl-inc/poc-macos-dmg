@@ -131,7 +131,7 @@ class Updater {
     // Retained strongly so the session + delegate survive past runModal()
     // Wrapped in a class to avoid Swift concurrency static var warnings
     private static let _holder = UpdaterHolder()
-    private class UpdaterHolder {
+    private class UpdaterHolder: @unchecked Sendable {
         var session: URLSession?
         var delegate: PinningDelegate?
     }
