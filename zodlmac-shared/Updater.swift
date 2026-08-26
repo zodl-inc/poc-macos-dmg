@@ -129,8 +129,8 @@ class Updater {
     static let teamID = "RLPRR8CPQG"
 
     // Retained strongly so the session + delegate survive past runModal()
-    private static var _activeSession: URLSession?
-    private static var _activeDelegate: PinningDelegate?
+    nonisolated(unsafe) private static var _activeSession: URLSession?
+    nonisolated(unsafe) private static var _activeDelegate: PinningDelegate?
 
     static func checkAndUpdate(log: @escaping @Sendable (String) -> Void) {
         log("🔍 Checking for updates (current: v\(currentVersion))...")
