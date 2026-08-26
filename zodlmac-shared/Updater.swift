@@ -128,10 +128,16 @@ class Updater {
     static let currentVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as! String
     static let teamID = "RLPRR8CPQG"
 
+    // Retained strongly so the session + delegate survive past runModal()
+    private static var _activeSession: URLSession?
+    private static var _activeDelegate: PinningDelegate?
+
     static func checkAndUpdate(log: @escaping @Sendable (String) -> Void) {
         log("🔍 Checking for updates (current: v\(currentVersion))...")
         let delegate = PinningDelegate(log: log)
         let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        _activeDelegate = delegate
+        _activeSession = session
 
         guard let url = URL(string: repoAPI) else { return }
         var req = URLRequest(url: url)

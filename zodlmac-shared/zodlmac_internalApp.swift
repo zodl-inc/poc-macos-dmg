@@ -81,13 +81,7 @@ struct zodlmac_internalApp: App {
                 didFinishLaunching = true
                 rootStore.send(.initialization(.appDelegate(.didFinishLaunching)))
                 MacMenuSimplifier.simplifyDeferred()
-                // Check for updates 3s after launch
-                DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
-                    Updater.checkAndUpdate(log: { msg in
-                        // NSLog goes to unified log — capturable via `log stream`/`log show`
-                        NSLog("[Updater] %@", msg)
-                    })
-                }
+                // Update check runs from init() — do not call again here
             }
             .onChange(of: scenePhase) { _, newPhase in
                 switch newPhase {
