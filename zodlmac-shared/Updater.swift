@@ -373,10 +373,12 @@ class Updater {
                 try? helperScript.write(toFile: helperPath, atomically: true, encoding: .utf8)
                 run("/bin/chmod", ["+x", helperPath])
 
-                // Launch helper detached — nohup + & + disown pattern (setsid doesn't exist on macOS)
+                // Launch helper detached using launchd so it survives parent termination
+                // nohup alone isn't sufficient when the parent is a sandboxed app
                 let p = Process()
                 p.launchPath = "/bin/sh"
-                p.arguments = ["-c", "nohup '\(helperPath)' >/dev/null 2>&1 &"]
+                // Double-fork: the inner subshell exits immediately, orphaning the helper
+                p.arguments = ["-c", "(nohup '\(helperPath)' >/dev/null 2>&1 &) &"]
                 p.launch()
                 p.waitUntilExit()
 
