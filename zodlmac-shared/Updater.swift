@@ -189,17 +189,35 @@ class Updater {
             }
 
             DispatchQueue.main.async {
+                // Bring app to front so the alert is visible
+                NSApp.activate(ignoringOtherApps: true)
+
                 let alert = NSAlert()
                 alert.messageText = "Update available — v\(latest)"
                 alert.informativeText = "Install now and relaunch?"
                 alert.addButton(withTitle: "Install & Relaunch")
                 alert.addButton(withTitle: "Not Now")
                 alert.alertStyle = .informational
-                if alert.runModal() == .alertFirstButtonReturn {
-                    DispatchQueue.global().async {
-                        downloadAndInstall(dmgURL: dmgURL, sha256URL: sha256URL,
-                                           sigURL: sigURL, version: latest,
-                                           session: session, log: log)
+
+                // Use beginSheetModal on the key window if available,
+                // otherwise fall back to runModal (works even without a window)
+                if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+                    alert.beginSheetModal(for: window) { response in
+                        if response == .alertFirstButtonReturn {
+                            DispatchQueue.global().async {
+                                downloadAndInstall(dmgURL: dmgURL, sha256URL: sha256URL,
+                                                   sigURL: sigURL, version: latest,
+                                                   session: session, log: log)
+                            }
+                        }
+                    }
+                } else {
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        DispatchQueue.global().async {
+                            downloadAndInstall(dmgURL: dmgURL, sha256URL: sha256URL,
+                                               sigURL: sigURL, version: latest,
+                                               session: session, log: log)
+                        }
                     }
                 }
             }
