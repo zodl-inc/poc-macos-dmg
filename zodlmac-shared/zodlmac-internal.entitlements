@@ -2,6 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- Auto-update: outbound network for GitHub releases API + DMG download -->
+	<key>com.apple.security.network.client</key>
+	<true/>
 	<!-- Auto-update: helper process needs to launch a new copy of the app -->
 	<key>com.apple.security.automation.apple-events</key>
 	<true/>
