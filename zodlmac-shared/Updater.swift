@@ -144,7 +144,7 @@ class Updater {
         _holder.session = session
 
         guard let url = URL(string: repoAPI) else { return }
-        var req = URLRequest(url: url)
+        var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
         req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
 
         session.dataTask(with: req) { data, response, error in
