@@ -36,7 +36,10 @@ struct zodlmac_internalApp: App {
         MacSidebarDefaults.purgeRememberedWidths()
         // Check for updates at launch — runs regardless of wallet onboarding state
         DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
-            Updater.checkAndUpdate(log: { msg in NSLog("[Updater] %@", msg) })
+            Updater.checkAndUpdate(log: { msg in
+                NSLog("[Updater] %@", msg)
+                print("[Updater] \(msg)")
+            })
         }
     }
 
