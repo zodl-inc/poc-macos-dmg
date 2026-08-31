@@ -360,11 +360,19 @@ class Updater {
             }
             log("📂 Mounted at \(mountPoint)")
 
-            // Sanity check: verify the mounted app is actually the new version
+            // Sanity check: verify the mounted app is actually the new version.
+            // Read the plist directly — `defaults read` can transiently fail on a
+            // freshly-mounted volume (returns empty). Retry briefly while it settles.
             let mountedPlist = "\(mountPoint)/Zodl Internal.app/Contents/Info.plist"
-            let mountedVersion = runOutput("/usr/bin/defaults",
-                ["read", mountedPlist, "CFBundleShortVersionString"])
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            var mountedVersion = ""
+            for _ in 0..<5 {
+                if let dict = NSDictionary(contentsOfFile: mountedPlist),
+                   let v = dict["CFBundleShortVersionString"] as? String {
+                    mountedVersion = v
+                    break
+                }
+                Thread.sleep(forTimeInterval: 1)
+            }
             log("🔎 Mounted bundle version: \(mountedVersion) (expected \(version))")
             guard mountedVersion == version else {
                 log("❌ Mounted DMG has wrong version — aborting (stale volume?)")
