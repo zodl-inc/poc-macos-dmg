@@ -310,8 +310,14 @@ class Updater {
 
             log("📂 Mounting DMG...")
             // NOTE: -quiet suppresses -plist output, so don't combine them
-            let mountOutput = runOutput("/usr/bin/hdiutil",
-                ["attach", dmgDest.path, "-nobrowse", "-plist"])
+            // -noverify: image verification is redundant (SHA256+Ed25519 already checked)
+            // and hdiutil's verify pass can fail/hang without a TTY
+            let mount = runFull("/usr/bin/hdiutil",
+                ["attach", dmgDest.path, "-nobrowse", "-noverify", "-plist"])
+            let mountOutput = mount.stdout
+            if mount.status != 0 {
+                log("⚠️ hdiutil exit \(mount.status) stderr: \(String(mount.stderr.prefix(300)))")
+            }
             // hdiutil can prefix the plist with verification chatter (stapled/checksummed
             // images) — parseMountPoint slices to <?xml…</plist> before parsing. If that
             // still fails, fall back to the deterministic volume name (embeds the version).
@@ -325,7 +331,8 @@ class Updater {
             }
             guard let mountPoint = resolvedMountPoint else {
                 log("❌ Couldn't parse mount point from hdiutil — aborting")
-                log("   raw hdiutil output (\(mountOutput.count) chars): \(String(mountOutput.prefix(500)))")
+                log("   exit=\(mount.status) stdout(\(mountOutput.count)): \(String(mountOutput.prefix(300)))")
+                log("   stderr(\(mount.stderr.count)): \(String(mount.stderr.prefix(300)))")
                 try? FileManager.default.removeItem(at: dmgDest)
                 return
             }
@@ -437,10 +444,23 @@ class Updater {
     }
 
     private static func runOutput(_ path: String, _ args: [String]) -> String {
+        return runFull(path, args).stdout
+    }
+
+    // stdout must be drained concurrently — waiting first deadlocks past the 64KB pipe buffer
+    private static func runFull(_ path: String, _ args: [String])
+        -> (stdout: String, stderr: String, status: Int32) {
         let p = Process(); p.launchPath = path; p.arguments = args
-        let pipe = Pipe(); p.standardOutput = pipe
-        p.launch(); p.waitUntilExit()
-        return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let outPipe = Pipe(); let errPipe = Pipe()
+        p.standardOutput = outPipe; p.standardError = errPipe
+        p.standardInput = FileHandle.nullDevice
+        p.launch()
+        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return (String(data: outData, encoding: .utf8) ?? "",
+                String(data: errData, encoding: .utf8) ?? "",
+                p.terminationStatus)
     }
 
     private static func parseMountPoint(_ plistString: String) -> String? {
