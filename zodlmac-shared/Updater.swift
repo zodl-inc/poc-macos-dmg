@@ -312,8 +312,18 @@ class Updater {
             // NOTE: -quiet suppresses -plist output, so don't combine them
             // -noverify: image verification is redundant (SHA256+Ed25519 already checked)
             // and hdiutil's verify pass can fail/hang without a TTY
-            let mount = runFull("/usr/bin/hdiutil",
+            // "Device not configured" (ENXIO): diskimagesiod flake, common on virtualized
+            // macOS (CI runners) — retry, then fall back to DiskImageMounter via `open`.
+            var mount = runFull("/usr/bin/hdiutil",
                 ["attach", dmgDest.path, "-nobrowse", "-noverify", "-plist"])
+            var attempt = 1
+            while mount.status != 0 && attempt < 4 {
+                log("⚠️ hdiutil attempt \(attempt) exit \(mount.status): \(String(mount.stderr.prefix(200))) — retrying...")
+                Thread.sleep(forTimeInterval: 2)
+                mount = runFull("/usr/bin/hdiutil",
+                    ["attach", dmgDest.path, "-nobrowse", "-noverify", "-plist"])
+                attempt += 1
+            }
             let mountOutput = mount.stdout
             if mount.status != 0 {
                 log("⚠️ hdiutil exit \(mount.status) stderr: \(String(mount.stderr.prefix(300)))")
@@ -322,11 +332,23 @@ class Updater {
             // images) — parseMountPoint slices to <?xml…</plist> before parsing. If that
             // still fails, fall back to the deterministic volume name (embeds the version).
             var resolvedMountPoint = parseMountPoint(mountOutput)
+            let fallback = "/Volumes/Zodl-\(version)"
+            if resolvedMountPoint == nil,
+               FileManager.default.fileExists(atPath: "\(fallback)/Zodl Internal.app") {
+                log("⚠️ plist parse failed — using volume-name fallback \(fallback)")
+                resolvedMountPoint = fallback
+            }
             if resolvedMountPoint == nil {
-                let fallback = "/Volumes/Zodl-\(version)"
-                if FileManager.default.fileExists(atPath: "\(fallback)/Zodl Internal.app") {
-                    log("⚠️ plist parse failed — using volume-name fallback \(fallback)")
-                    resolvedMountPoint = fallback
+                // Last resort: let DiskImageMounter (Aqua session) mount it, poll /Volumes
+                log("⚠️ hdiutil failed — trying DiskImageMounter via open -g...")
+                run("/usr/bin/open", ["-g", dmgDest.path])
+                for _ in 0..<30 {
+                    Thread.sleep(forTimeInterval: 1)
+                    if FileManager.default.fileExists(atPath: "\(fallback)/Zodl Internal.app") {
+                        log("📂 DiskImageMounter mounted \(fallback)")
+                        resolvedMountPoint = fallback
+                        break
+                    }
                 }
             }
             guard let mountPoint = resolvedMountPoint else {
