@@ -73,7 +73,7 @@ jobs:
               end repeat
               return "button not found"
             end tell
-APPLESCRIPT
+          APPLESCRIPT
           echo "osascript done"
 
           echo "Waiting 90s for download + verify + install + relaunch..."
