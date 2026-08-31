@@ -312,8 +312,20 @@ class Updater {
             // NOTE: -quiet suppresses -plist output, so don't combine them
             let mountOutput = runOutput("/usr/bin/hdiutil",
                 ["attach", dmgDest.path, "-nobrowse", "-plist"])
-            guard let mountPoint = parseMountPoint(mountOutput) else {
+            // hdiutil can prefix the plist with verification chatter (stapled/checksummed
+            // images) — parseMountPoint slices to <?xml…</plist> before parsing. If that
+            // still fails, fall back to the deterministic volume name (embeds the version).
+            var resolvedMountPoint = parseMountPoint(mountOutput)
+            if resolvedMountPoint == nil {
+                let fallback = "/Volumes/Zodl-\(version)"
+                if FileManager.default.fileExists(atPath: "\(fallback)/Zodl Internal.app") {
+                    log("⚠️ plist parse failed — using volume-name fallback \(fallback)")
+                    resolvedMountPoint = fallback
+                }
+            }
+            guard let mountPoint = resolvedMountPoint else {
                 log("❌ Couldn't parse mount point from hdiutil — aborting")
+                log("   raw hdiutil output (\(mountOutput.count) chars): \(String(mountOutput.prefix(500)))")
                 try? FileManager.default.removeItem(at: dmgDest)
                 return
             }
@@ -432,7 +444,14 @@ class Updater {
     }
 
     private static func parseMountPoint(_ plistString: String) -> String? {
-        guard let data = plistString.data(using: .utf8),
+        // hdiutil may emit non-plist lines (checksum/stapling verification) around the
+        // XML — slice from <?xml to </plist> so PropertyListSerialization gets clean input.
+        var candidate = plistString
+        if let start = candidate.range(of: "<?xml"),
+           let end = candidate.range(of: "</plist>") {
+            candidate = String(candidate[start.lowerBound..<end.upperBound])
+        }
+        guard let data = candidate.data(using: .utf8),
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil),
               let dict = plist as? [String: Any],
               let entities = dict["system-entities"] as? [[String: Any]] else { return nil }
