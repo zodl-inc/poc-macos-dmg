@@ -373,6 +373,22 @@ class Updater {
                 }
                 Thread.sleep(forTimeInterval: 1)
             }
+            if mountedVersion.isEmpty {
+                // Log the actual I/O error for diagnosis
+                do { _ = try Data(contentsOf: URL(fileURLWithPath: mountedPlist)) }
+                catch { log("⚠️ Info.plist read error: \(error)") }
+                let listing = (try? FileManager.default
+                    .contentsOfDirectory(atPath: mountPoint))?.joined(separator: ", ") ?? "<unreadable>"
+                log("⚠️ Volume listing: \(listing)")
+                // The volume name embeds the version (see build-signed.sh) — a volume
+                // named Zodl-<version> cannot be a stale mount of an older release,
+                // which is all this check guards against. Trust it if the plist is
+                // unreadable (seen on DiskImageMounter-mounted volumes on macOS 15 CI).
+                if mountPoint.hasSuffix("Zodl-\(version)") {
+                    log("⚠️ Trusting versioned volume name in lieu of plist check")
+                    mountedVersion = version
+                }
+            }
             log("🔎 Mounted bundle version: \(mountedVersion) (expected \(version))")
             guard mountedVersion == version else {
                 log("❌ Mounted DMG has wrong version — aborting (stale volume?)")
