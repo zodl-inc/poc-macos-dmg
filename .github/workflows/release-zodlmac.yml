@@ -225,11 +225,29 @@ jobs:
           xcrun stapler staple "$DMG_PATH"
           echo "✅ Notarized: $DMG_PATH"
 
+      # The updater consumes the ZIP (ditto-extracted in place — no DMG mount,
+      # which is flaky on virtualized macOS and TCC-blocked on macOS 15).
+      # The DMG remains the human-facing install artifact.
+      - name: Build update ZIP
+        run: |
+          # Staple the app itself so the zipped copy carries the notarization ticket
+          xcrun stapler staple "build/export/Zodl Internal.app" || true
+          ZIP_PATH="build/Zodl-$VERSION.zip"
+          ditto -c -k --keepParent "build/export/Zodl Internal.app" "$ZIP_PATH"
+          echo "ZIP_PATH=$ZIP_PATH" >> $GITHUB_ENV
+          du -sh "$ZIP_PATH"
+
       - name: SHA256 + Ed25519 sign
         run: |
           SHA256_FILE="${DMG_PATH%.dmg}.sha256"
           shasum -a 256 "$DMG_PATH" | awk '{print $1}' > "$SHA256_FILE"
-          echo "SHA256: $(cat $SHA256_FILE)"
+          echo "SHA256 (dmg): $(cat $SHA256_FILE)"
+
+          # Zip checksum is named <zip>.sha256 — the updater matches on the exact
+          # asset name, keeping it distinct from the legacy DMG .sha256.
+          ZIP_SHA256_FILE="$ZIP_PATH.sha256"
+          shasum -a 256 "$ZIP_PATH" | awk '{print $1}' > "$ZIP_SHA256_FILE"
+          echo "SHA256 (zip): $(cat $ZIP_SHA256_FILE)"
 
           SIGNING_SECRET=$(aws secretsmanager get-secret-value \
             --secret-id /infra/apple/update-signing-key \
@@ -239,6 +257,7 @@ jobs:
             > /tmp/update_signing_key.pem
           pip3 install cryptography --quiet --break-system-packages 2>/dev/null || true
           python3 scripts/sign-checksum.py /tmp/update_signing_key.pem "$SHA256_FILE"
+          python3 scripts/sign-checksum.py /tmp/update_signing_key.pem "$ZIP_SHA256_FILE"
           rm /tmp/update_signing_key.pem
 
       - name: Create GitHub Release
@@ -246,6 +265,7 @@ jobs:
         with:
           files: |
             build/Zodl-*.dmg
+            build/Zodl-*.zip
             build/Zodl-*.sha256
             build/Zodl-*.sha256.sig.b64
           generate_release_notes: false

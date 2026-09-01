@@ -123,7 +123,8 @@ jobs:
           if [ "$INSTALLED" = "1.0.1" ]; then
             echo "✅ Successfully updated to v1.0.1"
           else
-            echo "⚠️  Still at $INSTALLED (update may require user interaction)"
+            echo "❌ Still at $INSTALLED — auto-update did NOT complete"
+            exit 1
           fi
 
           # Check for running processes

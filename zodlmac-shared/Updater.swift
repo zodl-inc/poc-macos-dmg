@@ -177,16 +177,37 @@ class Updater {
                 return
             }
 
-            let dmgAsset   = release.assets.first(where: { $0.name.hasSuffix(".dmg") })
-            let sha256Asset = release.assets.first(where: { $0.name.hasSuffix(".sha256") })
-            let sigAsset    = release.assets.first(where: { $0.name.hasSuffix(".sha256.sig.b64") })
-            log("📎 Assets: DMG=\(dmgAsset?.name ?? "MISSING") sha256=\(sha256Asset?.name ?? "MISSING") sig=\(sigAsset?.name ?? "MISSING")")
+            // Prefer the .zip artifact: extracted with ditto into our own container,
+            // so no hdiutil attach (ENXIO flake on virtualized macOS) and no reads
+            // from a TCC-protected DiskImageMounter volume (EPERM on macOS 15).
+            // .dmg remains as fallback for releases published before the zip existed.
+            let zipAsset = release.assets.first(where: { $0.name.hasSuffix(".zip") })
+            let zipSha   = zipAsset.flatMap { z in release.assets.first(where: { $0.name == z.name + ".sha256" }) }
+            let zipSig   = zipAsset.flatMap { z in release.assets.first(where: { $0.name == z.name + ".sha256.sig.b64" }) }
 
-            guard let dmgAsset, let sha256Asset, let sigAsset,
-                  let dmgURL    = URL(string: dmgAsset.browser_download_url),
-                  let sha256URL = URL(string: sha256Asset.browser_download_url),
-                  let sigURL    = URL(string: sigAsset.browser_download_url) else {
-                log("❌ Missing required assets (DMG, .sha256, or .sha256.sig.b64)")
+            let dmgAsset   = release.assets.first(where: { $0.name.hasSuffix(".dmg") })
+            let sha256Asset = release.assets.first(where: { $0.name.hasSuffix(".sha256") && !$0.name.contains(".zip") })
+            let sigAsset    = release.assets.first(where: { $0.name.hasSuffix(".sha256.sig.b64") && !$0.name.contains(".zip") })
+
+            let install: @Sendable () -> Void
+            if let zipAsset, let zipSha, let zipSig,
+               let zipURL    = URL(string: zipAsset.browser_download_url),
+               let zipShaURL = URL(string: zipSha.browser_download_url),
+               let zipSigURL = URL(string: zipSig.browser_download_url) {
+                log("📎 Assets: ZIP=\(zipAsset.name) sha256=\(zipSha.name) sig=\(zipSig.name)")
+                install = { downloadAndInstallZip(zipURL: zipURL, sha256URL: zipShaURL,
+                                                  sigURL: zipSigURL, version: latest,
+                                                  session: session, log: log) }
+            } else if let dmgAsset, let sha256Asset, let sigAsset,
+                      let dmgURL    = URL(string: dmgAsset.browser_download_url),
+                      let sha256URL = URL(string: sha256Asset.browser_download_url),
+                      let sigURL    = URL(string: sigAsset.browser_download_url) {
+                log("📎 Assets: DMG=\(dmgAsset.name) sha256=\(sha256Asset.name) sig=\(sigAsset.name)")
+                install = { downloadAndInstall(dmgURL: dmgURL, sha256URL: sha256URL,
+                                               sigURL: sigURL, version: latest,
+                                               session: session, log: log) }
+            } else {
+                log("❌ Missing required assets (.zip or .dmg, + .sha256 + .sha256.sig.b64)")
                 return
             }
 
@@ -206,20 +227,12 @@ class Updater {
                 if let window = NSApp.keyWindow ?? NSApp.mainWindow {
                     alert.beginSheetModal(for: window) { response in
                         if response == .alertFirstButtonReturn {
-                            DispatchQueue.global().async {
-                                downloadAndInstall(dmgURL: dmgURL, sha256URL: sha256URL,
-                                                   sigURL: sigURL, version: latest,
-                                                   session: session, log: log)
-                            }
+                            DispatchQueue.global().async { install() }
                         }
                     }
                 } else {
                     if alert.runModal() == .alertFirstButtonReturn {
-                        DispatchQueue.global().async {
-                            downloadAndInstall(dmgURL: dmgURL, sha256URL: sha256URL,
-                                               sigURL: sigURL, version: latest,
-                                               session: session, log: log)
-                        }
+                        DispatchQueue.global().async { install() }
                     }
                 }
             }
@@ -407,7 +420,6 @@ class Updater {
 
             // Temp paths alongside the current install
             let destAppNew = "\(currentAppPath).new-update"
-            let destAppOld = "\(currentAppPath).old-update"
             run("/bin/sh", ["-c", "rm -rf '\(destAppNew)'"])
 
             let cpResult = run("/bin/sh", ["-c",
@@ -422,64 +434,197 @@ class Updater {
             }
             run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", destAppNew])
 
-            // Atomic swap: rename current → .old, new → current
-            // mv works even if the bundle is in use (doesn't touch open file handles)
-            if FileManager.default.fileExists(atPath: destApp) {
-                let mvOldResult = run("/bin/mv", [destApp, destAppOld])
-                log("  mv current → .old: exit \(mvOldResult)")
+            atomicSwapAndRelaunch(destAppNew: destAppNew, cleanup: {
+                run("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"])
+                try? FileManager.default.removeItem(at: dmgDest)
+            }, log: log)
+        }.resume()
+    }
+
+    // Shared tail for the .zip and .dmg paths. `destAppNew` holds a verified,
+    // quarantine-stripped copy of the new bundle alongside the current install;
+    // `cleanup` releases artifact-specific resources (mounts, downloads) after
+    // the swap succeeds.
+    private static func atomicSwapAndRelaunch(destAppNew: String,
+                                              cleanup: @escaping @Sendable () -> Void,
+                                              log: @escaping @Sendable (String) -> Void) {
+        let destApp = Bundle.main.bundlePath
+        let destAppOld = "\(destApp).old-update"
+
+        // Atomic swap: rename current → .old, new → current
+        // mv works even if the bundle is in use (doesn't touch open file handles)
+        if FileManager.default.fileExists(atPath: destApp) {
+            let mvOldResult = run("/bin/mv", [destApp, destAppOld])
+            log("  mv current → .old: exit \(mvOldResult)")
+        }
+        let mvNewResult = run("/bin/mv", [destAppNew, destApp])
+        log("  mv .new → current: exit \(mvNewResult)")
+
+        let exists = FileManager.default.fileExists(atPath: destApp)
+        log("  \(destApp) exists after swap: \(exists)")
+
+        log("✅ Install complete")
+
+        cleanup()
+
+        // Force Launch Services to register the new app location before relaunching.
+        // Without this, macOS LS cache may open the old copy from a different path.
+        run("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
+            ["-f", destApp])
+        // Touch the bundle so Finder/Spotlight see it as updated
+        run("/usr/bin/touch", [destApp])
+
+        log("🚀 Launching external helper to swap + relaunch...")
+
+        DispatchQueue.main.async {
+            let pid = ProcessInfo.processInfo.processIdentifier
+            let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+
+            // Write helper script to /tmp — runs completely outside the app bundle
+            let helperPath = "/tmp/helloworld-updater-\(pid).sh"
+            let helperScript = """
+                #!/bin/sh
+                # External updater helper — runs after the app process exits
+                # Swap .new-update into place, register with LS, open new version
+                while kill -0 \(pid) 2>/dev/null; do sleep 0.1; done
+                rm -rf '\(destAppOld)' 2>/dev/null
+                '\(lsregister)' -f '\(destApp)' 2>/dev/null
+                sleep 0.3
+                open -na '\(destApp)'
+                rm -f '\(helperPath)'
+                """
+            try? helperScript.write(toFile: helperPath, atomically: true, encoding: .utf8)
+            run("/bin/chmod", ["+x", helperPath])
+
+            // Launch helper detached using launchd so it survives parent termination
+            // nohup alone isn't sufficient when the parent is a sandboxed app
+            let p = Process()
+            p.launchPath = "/bin/sh"
+            // Double-fork: the inner subshell exits immediately, orphaning the helper
+            p.arguments = ["-c", "(nohup '\(helperPath)' >/dev/null 2>&1 &) &"]
+            p.launch()
+            p.waitUntilExit()
+
+            log("✅ Helper launched — app will close now")
+            NSApplication.shared.terminate(nil)
+        }
+    }
+
+    // ZIP update path: download → SHA256+Ed25519 → ditto extract in our own
+    // container → codesign + version check → swap. Never mounts anything, so it
+    // works where hdiutil/DiskImageMounter can't (virtualized CI, TCC-locked
+    // volumes on macOS 15).
+    private static func downloadAndInstallZip(zipURL: URL, sha256URL: URL, sigURL: URL,
+                                              version: String,
+                                              session: URLSession,
+                                              log: @escaping @Sendable (String) -> Void) {
+        let zipDest = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("Zodl Internal-\(version).zip")
+
+        log("📥 Fetching checksum + signature...")
+        guard let sha256Data = try? Data(contentsOf: sha256URL),
+              let sha256Line = String(data: sha256Data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .components(separatedBy: .whitespaces).first else {
+            log("❌ Couldn't fetch .sha256")
+            return
+        }
+        guard let sigB64Raw = try? String(contentsOf: sigURL, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines), !sigB64Raw.isEmpty else {
+            log("❌ Couldn't fetch .sha256.sig.b64")
+            return
+        }
+        log("🔢 Expected SHA256: \(sha256Line)")
+        log("🔏 Verifying Ed25519 signature on checksum...")
+        // sign-checksum.py signs the hex string (not the full file bytes)
+        let sha256HexData = Data(sha256Line.utf8)
+        guard verifyEd25519(data: sha256HexData, signatureB64: sigB64Raw, log: log) else {
+            log("❌ Ed25519 verification failed — aborting")
+            return
+        }
+
+        log("📥 Downloading ZIP...")
+        session.downloadTask(with: zipURL) { tmp, _, error in
+            guard let tmp, error == nil else {
+                log("❌ Download failed: \(error?.localizedDescription ?? "unknown")")
+                return
             }
-            let mvNewResult = run("/bin/mv", [destAppNew, destApp])
-            log("  mv .new → current: exit \(mvNewResult)")
+            try? FileManager.default.removeItem(at: zipDest)
+            try? FileManager.default.moveItem(at: tmp, to: zipDest)
+            log("💾 Saved to \(zipDest.lastPathComponent)")
 
-            let exists = FileManager.default.fileExists(atPath: destApp)
-            log("  \(destApp) exists after swap: \(exists)")
-
-            log("✅ Install complete")
-
-            run("/usr/bin/hdiutil", ["detach", mountPoint, "-quiet", "-force"])
-            try? FileManager.default.removeItem(at: dmgDest)
-
-            // Force Launch Services to register the new app location before relaunching.
-            // Without this, macOS LS cache may open the old copy from a different path.
-            run("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
-                ["-f", destApp])
-            // Touch the bundle so Finder/Spotlight see it as updated
-            run("/usr/bin/touch", [destApp])
-
-            log("🚀 Launching external helper to swap + relaunch...")
-
-            DispatchQueue.main.async {
-                let pid = ProcessInfo.processInfo.processIdentifier
-                let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-
-                // Write helper script to /tmp — runs completely outside the app bundle
-                let helperPath = "/tmp/helloworld-updater-\(pid).sh"
-                let helperScript = """
-                    #!/bin/sh
-                    # External updater helper — runs after the app process exits
-                    # Swap .new-update into place, register with LS, open new version
-                    while kill -0 \(pid) 2>/dev/null; do sleep 0.1; done
-                    rm -rf '\(destAppOld)' 2>/dev/null
-                    '\(lsregister)' -f '\(destApp)' 2>/dev/null
-                    sleep 0.3
-                    open -na '\(destApp)'
-                    rm -f '\(helperPath)'
-                    """
-                try? helperScript.write(toFile: helperPath, atomically: true, encoding: .utf8)
-                run("/bin/chmod", ["+x", helperPath])
-
-                // Launch helper detached using launchd so it survives parent termination
-                // nohup alone isn't sufficient when the parent is a sandboxed app
-                let p = Process()
-                p.launchPath = "/bin/sh"
-                // Double-fork: the inner subshell exits immediately, orphaning the helper
-                p.arguments = ["-c", "(nohup '\(helperPath)' >/dev/null 2>&1 &) &"]
-                p.launch()
-                p.waitUntilExit()
-
-                log("✅ Helper launched — app will close now")
-                NSApplication.shared.terminate(nil)
+            guard let zipData = try? Data(contentsOf: zipDest) else { return }
+            let actualHash = SHA256.hash(data: zipData).map { String(format: "%02x", $0) }.joined()
+            log("🔢 Actual   SHA256: \(actualHash)")
+            guard actualHash == sha256Line else {
+                log("❌ SHA256 mismatch — aborting")
+                try? FileManager.default.removeItem(at: zipDest)
+                return
             }
+            log("✅ SHA256 verified")
+
+            // Extract into our own temp dir. ditto preserves symlinks and extended
+            // attributes, so the Developer ID signature stays valid.
+            let stageDir = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("Zodl-update-stage-\(version)")
+            try? FileManager.default.removeItem(at: stageDir)
+            let dittoResult = run("/usr/bin/ditto", ["-x", "-k", zipDest.path, stageDir.path])
+            log("📂 ditto extract: exit \(dittoResult)")
+            let stagedApp = stageDir.appendingPathComponent("Zodl Internal.app").path
+            guard dittoResult == 0, FileManager.default.fileExists(atPath: stagedApp) else {
+                log("❌ Extract failed — aborting")
+                try? FileManager.default.removeItem(at: stageDir)
+                try? FileManager.default.removeItem(at: zipDest)
+                return
+            }
+
+            let verifyResult = runOutput("/bin/sh", ["-c",
+                "codesign -dv '\(stagedApp)' 2>&1 | grep TeamIdentifier"])
+            log("🔏 codesign: \(verifyResult.trimmingCharacters(in: .whitespacesAndNewlines))")
+            guard verifyResult.contains("TeamIdentifier=\(teamID)") else {
+                log("❌ Code signature mismatch — aborting")
+                try? FileManager.default.removeItem(at: stageDir)
+                try? FileManager.default.removeItem(at: zipDest)
+                return
+            }
+            log("✅ Code signature verified")
+
+            // Sanity check: the extracted bundle must actually be the new version.
+            // Unlike the DMG path, this plist lives in our own container — always readable.
+            var stagedVersion = ""
+            if let dict = NSDictionary(contentsOfFile: "\(stagedApp)/Contents/Info.plist"),
+               let v = dict["CFBundleShortVersionString"] as? String {
+                stagedVersion = v
+            }
+            log("🔎 Staged bundle version: \(stagedVersion) (expected \(version))")
+            guard stagedVersion == version else {
+                log("❌ Extracted app has wrong version — aborting")
+                try? FileManager.default.removeItem(at: stageDir)
+                try? FileManager.default.removeItem(at: zipDest)
+                return
+            }
+
+            run("/usr/bin/xattr", ["-dr", "com.apple.quarantine", stagedApp])
+
+            let currentAppPath = Bundle.main.bundlePath
+            log("📍 Current app path: \(currentAppPath)")
+            log("📁 Target (in-place): \(currentAppPath)")
+
+            let destAppNew = "\(currentAppPath).new-update"
+            run("/bin/sh", ["-c", "rm -rf '\(destAppNew)'"])
+            let mvStageResult = run("/bin/mv", [stagedApp, destAppNew])
+            log("  mv staged → .new: exit \(mvStageResult)")
+            guard mvStageResult == 0 && FileManager.default.fileExists(atPath: destAppNew) else {
+                log("❌ Staging move failed — aborting")
+                try? FileManager.default.removeItem(at: stageDir)
+                try? FileManager.default.removeItem(at: zipDest)
+                return
+            }
+
+            atomicSwapAndRelaunch(destAppNew: destAppNew, cleanup: {
+                try? FileManager.default.removeItem(at: stageDir)
+                try? FileManager.default.removeItem(at: zipDest)
+            }, log: log)
         }.resume()
     }
 
