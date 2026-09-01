@@ -454,11 +454,17 @@ class Updater {
         // Atomic swap: rename current → .old, new → current
         // mv works even if the bundle is in use (doesn't touch open file handles)
         if FileManager.default.fileExists(atPath: destApp) {
-            let mvOldResult = run("/bin/mv", [destApp, destAppOld])
-            log("  mv current → .old: exit \(mvOldResult)")
+            let mvOld = runFull("/bin/mv", [destApp, destAppOld])
+            log("  mv current → .old: exit \(mvOld.status) \(mvOld.stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
-        let mvNewResult = run("/bin/mv", [destAppNew, destApp])
-        log("  mv .new → current: exit \(mvNewResult)")
+        let mvNew = runFull("/bin/mv", [destAppNew, destApp])
+        log("  mv .new → current: exit \(mvNew.status) \(mvNew.stderr.trimmingCharacters(in: .whitespacesAndNewlines))")
+        if mvNew.status != 0 {
+            // Roll back so the user still has a working install
+            let rollback = runFull("/bin/mv", [destAppOld, destApp])
+            log("❌ Swap failed — rolled back (exit \(rollback.status))")
+            return
+        }
 
         let exists = FileManager.default.fileExists(atPath: destApp)
         log("  \(destApp) exists after swap: \(exists)")
@@ -612,10 +618,22 @@ class Updater {
 
             let destAppNew = "\(currentAppPath).new-update"
             run("/bin/sh", ["-c", "rm -rf '\(destAppNew)'"])
-            let mvStageResult = run("/bin/mv", [stagedApp, destAppNew])
-            log("  mv staged → .new: exit \(mvStageResult)")
-            guard mvStageResult == 0 && FileManager.default.fileExists(atPath: destAppNew) else {
-                log("❌ Staging move failed — aborting")
+            // Prefer an in-volume rename; fall back to a ditto copy (preserves
+            // symlinks/xattrs, so the signature survives) and surface real errors —
+            // a bare `mv` exit code told us nothing on the CI runner.
+            var staged = false
+            do {
+                try FileManager.default.moveItem(atPath: stagedApp, toPath: destAppNew)
+                staged = true
+                log("  staged via FileManager.moveItem")
+            } catch {
+                log("⚠️ moveItem failed: \(error) — falling back to ditto copy")
+                let dittoCp = runFull("/usr/bin/ditto", [stagedApp, destAppNew])
+                log("  ditto stage: exit \(dittoCp.status) \(String(dittoCp.stderr.prefix(300)))")
+                staged = dittoCp.status == 0
+            }
+            guard staged && FileManager.default.fileExists(atPath: destAppNew) else {
+                log("❌ Staging failed — aborting")
                 try? FileManager.default.removeItem(at: stageDir)
                 try? FileManager.default.removeItem(at: zipDest)
                 return
