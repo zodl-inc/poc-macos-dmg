@@ -1,3 +1,20 @@
+# macOS auto-update PoC (zodlmac)
+
+This repo is the PoC/staging ground for the Zodl macOS auto-updater
+(`zodlmac-shared/Updater.swift` + `release-zodlmac.yml` + `e2e-autoupdate.yml`).
+The feature was ported to `zodl-inc/zodl-ios` branch `macos-revival`
+(PR [#2052](https://github.com/zodl-inc/zodl-ios/pull/2052)) — the canonical
+documentation, including the **full parameter reference** (GitHub repo variables,
+GitHub secrets, AWS Secrets Manager secrets, workflow inputs) lives there in
+`docs/macos/AUTO_UPDATE.md`. The same repo variables are configured here; all
+trust anchors (feed repo, Ed25519 pubkey, SPKI pins, team ID) are CI-managed —
+the checked-in `zodlmac-shared/UpdaterConfig.plist` is a dev-build default only.
+Signing materials are never stored in the repo or GitHub: workflows assume an
+IAM role via OIDC and read AWS Secrets Manager at runtime. Public release
+artifacts are published to `zodl-inc/poc-macos-dmg-test`.
+
+---
+
 # Zashi iOS Wallet
 
 This is the official home of the Zashi Zcash wallet, a no-frills
